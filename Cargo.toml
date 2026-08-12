@@ -1,6 +1,6 @@
 [package]
 name = "geosetta-crs-data"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Embedded CRS registry data (PROJJSON + WKT definitions, derived from PROJ/proj.db) for Geosetta. The Rust glue is MIT; the embedded data carries third-party dataset terms — see NOTICE."
 license = "MIT"
