@@ -1,0 +1,303 @@
+#+TITLE: Spec: CRS Registry In-Blob Container Format (v1/v2)
+#+AUTHOR: Daniel Okuniewicz Jr.
+#+DATE: {{{time(%Y-%m-%d)}}}
+
+* CRS Registry Container Format — =GCR1=
+
+The wire format of =registry.bin.zst= (see =crs-registry.org=, milestones R1/R5).
+This is the layout *inside* the buffer that =geosetta='s zstd decoder produces —
+the =.zst= file is a plain zstd frame wrapping one =GCR1= image. Read this
+alongside =crs-registry.org= (the why) and =geosetta/src/compress/zstd.rs= (the
+decoder whose contract this format must respect).
+
+*STATUS: v1 IMPLEMENTED then SUPERSEDED by v2 (R5, 2026-08-12) before release —
+nothing built on v1 shipped.* =tools/gen_crs_registry.py= emits =GCR1= v2 for all
+13 790 CRSes: PROJJSON (always), WKT1 (~96%), and now WKT2:2019 (R5, added to
+cover the ~4% WKT1 cannot express — datum ensembles, dynamic CRSes, some
+compound). The =geosetta= reader (=src/crs/registry.rs=) decodes the =GCR1=
+image once into a =OnceLock= and answers =def_projjson=/=def_wkt=/=def_wkt2= via
+binary search. *Verified end-to-end against the real universe (v1, still holds
+for v2's PROJJSON/WKT1 fields):* the registry oracle (every one of the 13 790
+embedded defs through =projinfo --identify=) passes at *13 756/13 790 (99.75%)
+@ 100%*, with the remaining 34 an exhaustive, documented allowlist of =projinfo=
+limitations (EngineeringCRS unsupported by =--identify=; a few ESRI codes that
+are exact EPSG duplicates identify as the EPSG twin instead) — not registry-data
+or pipeline defects (see =KNOWN_IDENTIFY_GAPS= in =registry.rs=). This run also
+caught and fixed a real generator bug: =STRIP_KEYS= stripped =scope=/=area=/
+=bbox= recursively but missed the plural =usages= array (multi-scope CRSes),
+leaving =\"usages\":[{},{}]= — invalid PROJJSON that =projinfo= rejected
+outright. Fixed by stripping =usages= as a whole key.
+
+*v2 (R5) measured, not estimated:* the =v2= blob is *1.07 MB compressed*
+(43.08 MB raw), up from =v1='s 637 KB/28.7 MB — WKT2 added *~436 KB*
+compressed, under the plan's own ~+0.8 MB estimate. Its own oracle
+(=bulk_oracle_every_entry_wkt2_identifies_and_covers_wkt1_gap=) confirms both
+of R5's claims empirically: *0* entries missing WKT2 (the has_wkt=0 → has_wkt2=1
+coverage claim), *13 735/13 790 (99.6%)* self-identify at 100%, the other *55*
+an exhaustive allowlist split across =KNOWN_IDENTIFY_GAPS= (34, carried over —
+turn out to be format-independent, not PROJJSON-specific) and a new
+=KNOWN_WKT2_IDENTIFY_GAPS= (21, genuinely WKT2-specific — the same codes
+self-identify fine via PROJJSON). This run also found and fixed a second real
+generator bug: a few EPSG =AREA= descriptions carry a literal embedded newline
+in the source data, surviving into WKT2 text even under =--single-line= and
+truncating =parse_sections='s naive first-line capture — fixed by accumulating
+lines until the next real header instead. See =crs-registry.org='s R5 section
+and =handoff.org= § KEY FINDINGS for the full writeup.
+
+** DESIGN GOALS
+- *Zero-copy lookup.* Decompress once; answer =def_projjson(auth, code)= /
+  =def_wkt(auth, code)= by binary search + slice, returning =&'static str= into the
+  decoded buffer. No per-entry allocation, no map build.
+- *Self-describing.* The image carries its own format version, dataset versions,
+  and entry count, so a blob is identifiable without any out-of-band Rust consts.
+  This is what makes the *user-built* path (§ USER-BUILT BLOBS) robust — a blob
+  built from someone else's =proj.db= is unambiguous on its own.
+- *Decoder-compatible.* Nothing here requires more of =zstd.rs= than it already
+  does: a single plain frame, no dictionary, no skippable frames.
+- *Forward-compatible.* A reader that doesn't recognize the format version declines
+  cleanly and the caller falls back to the structural path (degraded mode), never
+  crashes or mis-reads.
+
+** RELATIONSHIP TO THE ZSTD DECODER  (hard constraints)
+=compress/zstd.rs= is decode-only and imposes three things the *generator* must
+honor, and one the *reader* must supply:
+
+1. *Single plain frame, no dictionary.* =parse_frame_header= skips (does not apply)
+   a dictionary id and reads exactly one frame. Compress with the =zstd= CLI at
+   =-19=, *no* =--long=, *no* dictionary, *no* multi-frame concatenation. (This
+   matches the CLI-as-oracle posture already used in =zstd.rs='s tests.)
+2. *Checksum is read but ignored* — harmless to include, but don't rely on it.
+3. *Window size is irrelevant* — the decoder retains all output, so any back-
+   reference distance resolves. Still, omit =--long= for determinism.
+4. *The decompressed size must be known up front.* =decompress(input, expected)=
+   *asserts* =out.len() == expected= and the decoder deliberately ignores the
+   frame's Frame_Content_Size. So the crate exposes, alongside
+   =REGISTRY_BLOB_ZSTD=, a generated =REGISTRY_BLOB_RAW_SIZE: usize= (the =GCR1=
+   image length). The reader passes it to =decompress=. *(Implemented — the const
+   is now emitted into =generated.rs= and re-exported from =lib.rs=.)*
+
+** KEY MODEL — (authority, code), code is a STRING
+The registry key is *(authority, code)*. *Codes are strings, not integers.* Verified
+against =proj.db= (=crs_view=): =IGNF= (864), =NKG= (2), =OGC= (4), =PROJ= (4)
+carry alphanumeric codes (=IGNF:AMANU49G=, =OGC:CRS84=), max length *26* chars.
+=EPSG=/=ESRI=/=IAU_2015= codes are numeric but are still stored and compared *as
+their string form* so one code path serves every authority.
+
+*Fixed:* the skeleton's =NAMES: &[(&str, &str, i64)]= (and the plan's
+=(authority, code) -> i64=) is wrong for IGNF/OGC/PROJ/NKG. =NAMES= and the registry
+key now use a *string* code: =&[(&str /*name*/, &str /*auth*/, &str /*code*/)]= in
+=lib.rs=, and the =GCR1= index stores codes as bytes.
+
+Authorities are a closed, small set today (7: =EPSG=, =ESRI=, =IAU_2015=, =IGNF=,
+=OGC=, =PROJ=, =NKG=) but stored as a string table so a future =proj.db= can add
+one without a format bump.
+
+** BYTE LAYOUT
+All integers *little-endian* (matches the platforms Geosetta targets and the LE
+reads already in =zstd.rs=). All strings *UTF-8*, *not* NUL-terminated (explicit
+lengths). All section offsets are byte offsets from the start of the decoded image.
+Fields read via =u32::from_le_bytes= on slices, so *no alignment requirement* on
+the buffer.
+
+*** Header (fixed, 64 bytes)
+| offset | size | field           | notes                                                    |
+|--------+------+-----------------+-----------------------------------------------------------|
+|      0 |    4 | magic           | ASCII =GCR1=                                              |
+|      4 |    2 | format_version  | =2= (=1= for pre-R5 blobs; see § V1→V2)                    |
+|      6 |    2 | flags           | bit0 = any WKT1 present; bit1 = any WKT2 present (v2+); bits 2..=reserved 0 |
+|      8 |    4 | entry_count     | N (= 13 790 today)                                       |
+|     12 |    2 | auth_count      | number of authorities in the authority table             |
+|     14 |    2 | reserved        | 0                                                        |
+|     16 |    4 | authorities_off | → authority table                                        |
+|     20 |    4 | index_off       | → index (fixed-width records)                            |
+|     24 |    4 | keys_off        | → key (code-string) pool                                 |
+|     28 |    4 | payload_off     | → PROJJSON/WKT1/WKT2 string bytes                         |
+|     32 |    4 | versions_off    | → dataset-versions section                               |
+|     36 |    4 | image_len       | total image length (== REGISTRY_BLOB_RAW_SIZE)           |
+|     40 |   24 | reserved        | 0 — room for future section offsets                       |
+
+*** Authority table  (at =authorities_off=)
+=auth_count= entries, each: =u8 len= then =len= UTF-8 bytes. Position in the table
+is the =auth_id= (=u8=) referenced by index records. Order is generation order;
+the reader maps an authority *string* → =auth_id= by scanning this table (≤ ~10
+entries — trivial), or declines if absent.
+
+*** Index  (at =index_off=) — N fixed-width 32-byte records, sorted (v2)
+Sorted ascending by the composite key =(auth_id, code_bytes)=, where =code_bytes=
+compares *bytewise* (=memcmp=). The generator and reader MUST use this identical
+ordering; binary search depends on it.
+
+Record (32 bytes, v2 — see § V1→V2 for the frozen 24-byte v1 shape):
+| offset | size | field     | notes                                              |
+|--------+------+-----------+-----------------------------------------------------|
+|      0 |    1 | auth_id   | index into the authority table                     |
+|      1 |    1 | key_len   | code-string length (≤ 26 today, ≤ 255 by format)   |
+|      2 |    1 | has_wkt   | 1 if a WKT1 form is present, else 0                |
+|      3 |    1 | has_wkt2  | 1 if a WKT2:2019 form is present, else 0 (v2)      |
+|      4 |    4 | key_off   | offset into key pool of the code string            |
+|      8 |    4 | proj_off  | offset into payload of the PROJJSON                |
+|     12 |    4 | proj_len  | PROJJSON byte length                               |
+|     16 |    4 | wkt_off   | offset into payload of the WKT1 (0 if has_wkt=0)   |
+|     20 |    4 | wkt_len   | WKT1 byte length (0 if has_wkt=0)                  |
+|     24 |    4 | wkt2_off  | offset into payload of the WKT2 (0 if has_wkt2=0)  |
+|     28 |    4 | wkt2_len  | WKT2 byte length (0 if has_wkt2=0)                 |
+
+Record =i= lives at =index_off + i*32=. PROJJSON is *always* present
+(=proj_len > 0=). WKT1 is present for ~96% of CRSes (=has_wkt=1=); the ~4% with
+no faithful WKT1 (datum ensembles, dynamic CRSes, some compound) set
+=has_wkt=0=. WKT2:2019 can express everything PROJJSON can (R5) and is present
+for effectively all entries — in particular, every =has_wkt=0= entry has
+=has_wkt2=1=, so a WKT-target output now has a real fallback for the ~4% instead
+of id-ref + warning (verify this claim empirically per-generation; don't assume
+it holds forever as =proj.db= grows).
+
+*** Key pool  (at =keys_off=)
+Concatenated code strings (the *code* component only — the authority is via
+=auth_id=), referenced by =(key_off, key_len)=. Deduplication is unnecessary; codes
+are unique within an authority and short.
+
+*** Payload  (at =payload_off=)
+All PROJJSON strings, followed by all WKT1 strings, followed by all WKT2
+strings (grouping is immaterial — every reference is an explicit =(off, len)=).
+PROJJSON is the *compact* form (=scope=/=area=/=bbox= stripped, per
+=crs-registry.org= § SIZE); WKT1 and WKT2 are single-line GDAL-flavor /
+=WKT2:2019= respectively. UTF-8.
+
+*** Dataset-versions section  (at =versions_off=)
+A =u16 count=, then =count= pairs, each two length-prefixed UTF-8 strings
+=(source, version)=: e.g. =("EPSG","v12.029")=, =("PROJ","9.8.1")=,
+=("ESRI","ArcGIS Pro 3.6")=, =("IGNF","3.1.0")=, =("NKG","1.0.w")=, plus a
+=("proj.db.layout","1.6")= and a =("generated","<ISO-8601 date>")= record. Read
+straight from =proj.db='s =metadata= table by the generator. *This is the source of
+truth* for what the blob contains; the Rust =DATASET_VERSIONS= const is a mirror
+(below).
+
+** LOOKUP ALGORITHM (reader, =src/crs/registry.rs=)
+1. On first use, =decompress(REGISTRY_BLOB_ZSTD, REGISTRY_BLOB_RAW_SIZE)= into a
+   =OnceLock<Vec<u8>>= (resident only when the registry is actually used).
+2. Validate =magic == "GCR1"= and =format_version <= KNOWN=; otherwise return =None=
+   (caller degrades to structural). Cache the parsed header offsets.
+3. =auth_id = lookup_authority(auth_str)= (scan the authority table); miss → =None=.
+4. Binary-search the index for =(auth_id, code_bytes)=. Comparison: first =auth_id=,
+   then =memcmp= of the candidate's key-pool slice against =code_bytes=.
+5. On hit, slice =payload[proj_off .. proj_off+proj_len]= (=def_projjson=) or, if
+   =has_wkt=, =payload[wkt_off .. wkt_off+wkt_len]= (=def_wkt=). Return
+   =&'static str= (the =OnceLock='s buffer outlives the process). =from_utf8=
+   validated once at section level, or =debug_assert='d and trusted (generator
+   guarantees UTF-8).
+
+** GENERATED RUST MIRROR (convenience, not source of truth)
+The generator also emits, into =geosetta-crs-data/src/=:
+- =REGISTRY_BLOB_ZSTD= (=include_bytes!("registry.bin.zst")=) and the new
+  =REGISTRY_BLOB_RAW_SIZE=.
+- =CRS_COUNT= and =DATASET_VERSIONS= — a cheap-access mirror of the header /
+  versions section, so callers can print versions without decompressing.
+- =NAMES: &[(&str, &str, &str)]= (name, authority, *string* code) — generated in R1
+  (the data is in hand) though its consumer, name→code recovery, is R2.
+
+A test asserts the mirror equals the blob header/versions, so the two never drift.
+
+** VERSIONING / FORWARD-COMPATIBILITY
+- =format_version= gates the whole image. A reader supports a fixed max; a higher
+  version → decline (degraded mode), never a partial read.
+- New *sections* (referenced only via the header's =reserved= offset slots, no
+  record-shape change) can be added without a version bump — old readers ignore
+  unknown offsets. A change to the *record* shape itself (as v2's added
+  =has_wkt2=/=wkt2_off=/=wkt2_len= fields required) is a real layout change and
+  does need one, since =RECORD_SIZE= is a reader-side constant baked into the
+  binary-search stride, not self-describing per record. Each version's record
+  layout, once shipped, is then frozen.
+- Adding an authority or CRSes is *not* a format change — just a regen.
+
+*** V1 → V2 (R5, 2026-08-12)
+=v1= (R1) had a 24-byte record: =(auth_id, key_len, has_wkt, reserved, key_off,
+proj_off, proj_len, wkt_off, wkt_len)=. =v2= (R5) repurposes the =reserved= byte
+as =has_wkt2= and appends =(wkt2_off, wkt2_len)=, growing the record to 32
+bytes — see § Index above for the full v2 layout. =v1= was never released (no
+committed blob depended on it; =crs-registry.org= R1→R5 all landed on the same
+uncommitted working tree), so there was no live compatibility burden to
+preserve; =v2= simply replaced it, =FORMAT_VERSION= constant bumped
+=1= → =2= in both generator and reader. A future format change with a real
+released =v1= blob in the wild would need the reader to keep *both* a 24-byte
+and 32-byte record parser, branching on the header's =format_version= — not
+required here, but worth noting since this is the template for it.
+
+** USER-BUILT BLOBS — building from a locally-installed proj.db
+Goal (post-R1): let a user with =proj.db= installed run the generator to produce
+their own =GCR1= image, instead of consuming the crate's pre-built one. The
+self-describing header + versions section make this safe: a user-built blob stamps
+*their* =proj.db= versions, and the same reader loads it identically (via a build
+step, an env-pointed path, or a future =geosetta crs build= command — mechanism TBD;
+the *format* already supports it).
+
+*** Why this matters for licensing (see also =crs-registry.org= § ATTRIBUTION)
+Two distribution models, with materially different obligations:
+
+- *Model A — the project ships the pre-built blob* (=geosetta-crs-data= as
+  published). Here *the project is a redistributor* of EPSG/Esri/IGNF/… data, so it
+  takes on all the propagating terms: the IOGP acknowledgement, "derived
+  representation" marking, Esri Apache-2.0 =NOTICE=, "no charge for the data",
+  attributions. This is the release gate =crs-registry.org= already tracks.
+
+- *Model B — the project ships only code; the user builds the blob* from a
+  =proj.db= *they already have*. Here *the project redistributes none of that data* —
+  nothing crosses from project to user but MIT-licensed code. The user already holds
+  =proj.db= under PROJ's aggregate terms; deriving a representation for *their own
+  use* is ordinary use, and the propagating obligations (which are almost all
+  *redistribution* triggers) largely don't fire. If the user then *redistributes*
+  their blob, those obligations attach to *them* — exactly the Model-A position,
+  just moved to whoever chose to redistribute.
+
+*Net:* Model B is the *cleaner* licensing posture, and a good argument for
+supporting (even preferring) the local-build path. It sidesteps even the theoretical
+EPSG "no charge / must acknowledge" questions for the core distribution.
+
+*** Two conditions that keep Model B honest
+1. *The generator must stay strictly mechanical — it embeds no CRS-definition data.*
+   If the Python generator hard-codes CRS definitions, parameter *values*, or
+   fixtures of the geodetic dataset lifted from =proj.db=, then shipping the
+   generator *is* redistribution of that slice, and Model B's advantage leaks away.
+   It must *read* =proj.db=, never *carry* it.
+   - *Note (not a concern):* =geosetta='s committed =src/crs/wkt1_tables.rs= is
+     =proj.db=-*generated*, but it is a pure name/code *crosswalk* — GDAL WKT1
+     spellings → canonical EPSG method/parameter names + their integer codes, with
+     *no* geodetic values (no ellipsoid axes, datum shifts, parameter values, or
+     coordinates; verified — the file contains no numeric CRS data at all). It
+     carries EPSG *terminology and identifiers* (the structure), not the EPSG
+     parameter *dataset*, so it's an interoperability mapping akin to software
+     constants, not a redistribution of the dataset. It does not soften the core
+     crate's "bundles no third-party data" posture.
+2. *The blob must stay self-describing* (this format does that): a user-built blob
+   stamps the user's own dataset versions in its versions section and =NOTICE=
+   generation reads from there — so provenance/attribution always reflect the actual
+   source =proj.db=, not the project's pinned numbers.
+
+*** What Model B does NOT change
+- The pre-built crate (Model A) still exists for convenience; its attribution gate
+  is unchanged.
+- =proj.db='s own aggregate terms still bind the user (they installed it) — Model B
+  moves obligations, it doesn't dissolve them.
+
+** ORACLE / VALIDATION (R1, extended R5)
+- Round-trip: every embedded def fed through =projinfo --identify= must return its
+  own =(authority, code)= at *100%* (=crs-registry.org= R1.4). Guards the
+  embed/serialize/zstd-decode pipeline more than the (authoritative) defs.
+- Format self-check: =magic=, =format_version=, =entry_count == CRS_COUNT=, index
+  sortedness, every =(off, len)= in-bounds (now including =wkt2_off=/=wkt2_len=),
+  PROJJSON present for all N.
+- Mirror check: =DATASET_VERSIONS= / =CRS_COUNT= equal the blob header/versions.
+- R5 addition: every =has_wkt2=1= entry's WKT2 self-identifies at 100% too
+  (same allowlist-of-known-gaps discipline as R1), *and* specifically every
+  =has_wkt=0= entry has =has_wkt2=1= — the coverage claim R5 exists to make,
+  checked rather than assumed.
+
+** OPEN QUESTIONS
+- *Record width vs. size.* 32 B/record × 13 790 ≈ 441 KB of index (pre-zstd, highly
+  compressible). Fine. If it ever matters, =proj_len=/=wkt_len=/=wkt2_len= fit
+  =u16= (strings < 64 KB) to shave bytes/record — not worth it now.
+- *UTF-8 validation cost.* Validate each returned slice, or validate whole payload
+  sections once at first decode, or trust + =debug_assert=. Lean toward one
+  section-level validation at decode.
+- *Where a user-built blob is loaded from* (build step vs. runtime path vs. a
+  =geosetta crs build= subcommand) — mechanism for Model B, decided when that path
+  is built; the format is ready for it now.

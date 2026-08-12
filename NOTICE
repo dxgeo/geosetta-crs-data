@@ -1,0 +1,84 @@
+geosetta-crs-data
+Copyright (c) 2026 Daniel Okuniewicz Jr.
+
+The Rust code in this crate is licensed under the MIT License; see LICENSE.
+
+================================================================================
+Embedded coordinate reference system (CRS) registry
+================================================================================
+This crate embeds a CRS registry: coordinate reference system definitions
+rendered as PROJJSON and WKT, used by Geosetta for CRS identification and format
+translation. These definitions are DERIVED — programmatically re-encoded at build
+time from the PROJ database (proj.db) — and are NOT the official datasets of the
+organizations named below, nor are they authoritative. Each source's terms are
+honored below and continue to apply to anyone who redistributes this data.
+
+Dataset versions (stamped at generation from proj.db metadata):
+    EPSG      v12.029          (2025-10-02)
+    ESRI      ArcGIS Pro 3.6   (2025-12-01)
+    IGNF      3.1.0            (2019-05-24)
+    NKG       1.0.w            (2025-02-13)
+    PROJ      9.8.1  /  proj-data 1.24
+    IAU_2015  (planetary/lunar CRSes)
+
+--------------------------------------------------------------------------------
+PROJ
+--------------------------------------------------------------------------------
+The registry is derived from the PROJ database (proj.db). PROJ is
+Copyright (c) 2000, Frank Warmerdam, and Copyright (c) the PROJ contributors,
+distributed under the MIT license. See https://proj.org/.
+
+--------------------------------------------------------------------------------
+EPSG Geodetic Parameter Dataset (IOGP)
+--------------------------------------------------------------------------------
+Portions of the registry (the "EPSG" authority) are derived from the EPSG
+Geodetic Parameter Dataset.
+
+    (c) International Association of Oil & Gas Producers ("IOGP").
+
+The EPSG Dataset is owned by IOGP and is used here under the EPSG Dataset Terms
+of Use (https://epsg.org/terms-of-use.html). IOGP's ownership is acknowledged.
+The definitions distributed here have been MODIFIED from their original form
+(re-encoded as PROJJSON and WKT via PROJ) and must not be attributed to the EPSG
+Dataset as if unmodified. The EPSG Dataset is made available by IOGP at no charge;
+no charge is made for it here, and no part of any fee charged for a product
+incorporating this data may be ascribed to the EPSG data.
+
+--------------------------------------------------------------------------------
+Esri Projection Engine
+--------------------------------------------------------------------------------
+Portions of the registry (the "ESRI" authority) are derived from the Esri
+Projection Engine database documentation
+(https://github.com/Esri/projection-engine-db-doc), Copyright (c) Esri,
+licensed under the Apache License, Version 2.0. A copy of the Apache-2.0 license
+is provided in LICENSES/Apache-2.0.txt. These definitions were modified
+(re-encoded) from their original form.
+
+--------------------------------------------------------------------------------
+IGN France (IGNF)
+--------------------------------------------------------------------------------
+Portions of the registry (the "IGNF" authority) are derived from the IGNF
+geodetic registry published by the Institut national de l'information
+geographique et forestiere (IGN), used under IGN's open licence.
+
+--------------------------------------------------------------------------------
+IAU (IAU_2015)
+--------------------------------------------------------------------------------
+Portions of the registry (the "IAU_2015" authority — planetary and lunar
+coordinate reference systems) are derived from the coordinate-system
+recommendations of the IAU Working Group on Cartographic Coordinates and
+Rotational Elements (WGCCRE).
+
+--------------------------------------------------------------------------------
+NKG
+--------------------------------------------------------------------------------
+Portions of the registry (the "NKG" authority) are derived from the Nordic
+Geodetic Commission transformations
+(https://github.com/NordicGeodesy/NordicTransformations).
+
+--------------------------------------------------------------------------------
+No endorsement; no warranty
+--------------------------------------------------------------------------------
+None of the organizations named above endorse this software or are responsible
+for it. All embedded CRS definitions are provided "as is", without warranty of
+any kind. For authoritative CRS definitions, consult the respective source.

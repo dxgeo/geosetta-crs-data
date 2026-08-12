@@ -1,0 +1,15 @@
+[package]
+name = "geosetta-crs-data"
+version = "0.1.0"
+edition = "2024"
+description = "Embedded CRS registry data (PROJJSON + WKT definitions, derived from PROJ/proj.db) for Geosetta. The Rust glue is MIT; the embedded data carries third-party dataset terms — see NOTICE."
+license = "MIT"
+
+# This crate holds ONLY data + thin accessors. Decoding (zstd) and lookup live in
+# `geosetta`, which uses its own from-scratch codecs — so this crate has no
+# dependencies and `geosetta`'s default build stays dependency-free.
+[dependencies]
+
+[lib]
+name = "geosetta_crs_data"
+path = "src/lib.rs"

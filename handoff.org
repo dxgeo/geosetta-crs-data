@@ -1,0 +1,672 @@
+#+TITLE: Handoff: Geosetta CRS Work
+#+AUTHOR: Daniel Okuniewicz Jr.
+#+DATE: {{{time(%Y-%m-%d)}}}
+
+* Handoff — CRS work in Geosetta
+
+Orientation doc for an agent picking up the coordinate-reference-system (CRS)
+work. Read this, then =crs-registry.org= (the design plan) in this same directory.
+
+** TL;DR
+Geosetta carries a CRS through its IR opaquely and *labels but never reprojects*.
+Milestones A/B/C of =geosetta/plans/crs.org= are *shipped* (CRS-loss warnings,
+WKT-id lifting, and structural WKT→PROJJSON translation for WKT2 + "certain"
+WKT1). The active decision is a *pivot*: instead of translating CRS strings, embed
+PROJ's whole =proj.db= and resolve *(authority, code) → authoritative definition*.
+That data carries third-party terms, so it lives in a *separate crate*
+(=geosetta-crs-data=, this directory) behind a =crs-registry= Cargo feature; the
+core =geosetta= crate stays pure-MIT and dependency-free. The plan is
+=crs-registry.org= (milestones R1–R5); the container format is =registry-format.org=
+(=GCR1=). *R1 is DONE, all four steps:* the generator + embedded blob (all
+13 790 CRSes, =registry.bin.zst= = 637 KB); the reader (=src/crs/registry.rs=,
+=OnceLock=-decoded, =def_projjson=/=def_wkt= via binary search); GeoParquet
+=crs= emission routed through it for the trusted-id path
+(=NamedCrs::registry_projjson=, tried before WKT translation); the
+=--features crs-registry= rebuild hint on the GeoParquet id-reference warning
+(=#[cfg(not(feature = "crs-registry"))]=); and the full identify oracle
+(13 756/13 790 @ 100%, the remaining 34 an exhaustively-checked =projinfo=
+limitation, not a registry defect — see KEY FINDINGS). Verified end-to-end
+against a real GeoPackage (GDA2020/EPSG:7844): registry-resolved and
+structurally-translated PROJJSON are byte-identical where both apply. Also done
+since: =NamedCrs.code= is now =Option<String>= (was =Option<i64>=) across the
+whole =geosetta= IR — a prerequisite for R2/R4 ever surfacing an IGNF/OGC/PROJ/
+NKG alphanumeric code, see KEY FINDINGS. *R2 is now DONE — geographic
+(2026-08-12) and projected (2026-08-12).* =registry::resolve_geographic_by_name=
+/ =resolve_projected_by_name= look up an id-less WKT's outer name in =NAMES=
+and validate it against its base ellipsoid (relative =1e-6=) before snapping —
+never trusted outright. Geographic verified on the plan's own three worked
+examples (all now resolve correctly, including the two the plan measured as
+*wrong* under structural translation alone) and at scale: a 431-fixture bulk
+oracle over every native ESRI geographic CRS in =proj.db= resolves *327/431
+(76%), zero wrong*. Projected — originally scoped as the much heavier
+"structural param-match" (method+parameter crosswalk, the plan's "recovery
+3") — turned out not to need that at all: the *same* ellipsoid-only check
+already suffices, proven by a 2 274-fixture bulk oracle (every native ESRI
+projected CRS in =proj.db=) at *2185/2274 (96%) resolved@100%, zero wrong*
+(11 hit an already-documented R1 =projinfo --identify= gap, not a defect).
+See KEY FINDINGS and =crs-registry.org='s R2 section for the full writeup,
+including why axis order (what sank structural *translation* for projected
+Esri) was never a risk for name *recovery*. *R3 has a real design tension* (not
+yet resolved — see KEY FINDINGS): its "delete what the registry makes
+redundant" framing would regress the *default* (=crs-registry=-off) build if
+taken literally, since the crosswalk it wants to trim is shared,
+unconditionally-compiled code, not feature-gated. *R4 is DONE* (implemented
+2026-08-12, uncommitted) — =geosetta/plans/shapefile.org= (full Shapefile:
+=.shp=/=.shx= geometry incl. ring-classification for Polygon/MultiPolygon,
+=.dbf= attributes, =.prj= CRS), registered in =plans/README.org=. Read+write,
+both directions, including GeoPackage↔Shapefile fan-out; =.prj= writing is the
+first consumer of R1's =registry::def_wkt=. See § SHAPEFILE (R4) MILESTONE
+DETAIL below. *R5 is DONE* (2026-08-12): WKT2:2019 added to the registry blob
+(=GCR1= bumped =v1= → =v2=, =registry-format.org= § V1→V2) and a new
+=registry::def_wkt2=, closing the ~4% gap WKT1 can't express (datum
+ensembles, dynamic CRSes, some compound) — proven, not assumed, by a new bulk
+oracle: every one of the 13 790 entries now has WKT2, 13 735 self-identify at
+100%, the other 55 an exhaustive documented =projinfo --identify= allowlist
+(34 carried over from R1's own gaps turning out to be format-independent, 21
+new WKT2-specific ones). Wired into GeoPackage's =.gpkg= writer as the
+=definition_12_063= CRS-WKT extension column, verified end-to-end (writing
+=EPSG:4979=, Geographic 3D, produces a real WKT2 string where WKT1 has none).
+Found and fixed a real generator bug along the way: a few EPSG =AREA=
+descriptions carry a literal embedded newline in the source data that broke
+the line-based section parser under =--single-line=, silently truncating two
+CRSes' WKT2 — see KEY FINDINGS.
+
+** TWO REPOS / LOCATIONS
+- =~/Projects/geosetta= :: the main crate (git repo, branch =main=, remote
+  =github.com/dxgeo/geosetta=). Holds all shipped CRS code.
+- =~/Projects/geosetta-crs-data= :: sibling data crate (*this dir*). *NOT under
+  git yet* (intentional). Holds the registry plan + =GCR1= format spec, =NOTICE=,
+  the (implemented) generator, and the crate with its generated blob + tables.
+
+*** Key files — geosetta
+- =src/crs.rs= :: =Crs= / =NamedCrs= IR, =from_authority_code= (WGS84 collapse + WKT
+  id lift = milestone B), =downgrade_warning= (milestone A CRS-loss warnings),
+  =parquet_expressible=.
+- =src/crs/wkt_projjson.rs= :: structural WKT→PROJJSON (=wkt_to_projjson=) =
+  milestone C. Contains the two =#[ignore]= *bulk oracles*.
+- =src/crs/wkt1_tables.rs= :: GENERATED WKT1→PROJJSON crosswalk tables (do not
+  hand-edit).
+- =src/crs/registry.rs= :: *NEW, feature-gated, IMPLEMENTED* (uncommitted) — the
+  =GCR1= reader: =OnceLock=-decoded via =compress/zstd.rs=, binary-search lookup,
+  =def_projjson=/=def_wkt= (R1); =resolve_geographic_by_name= / =resolve_projected_by_name=
+  (R2, both scopes done) — name→code recovery validated against the WKT's
+  (base, for projected) ellipsoid.
+  *Wired into GeoParquet* (=src/crs.rs='s =NamedCrs::registry_projjson=, called
+  from =parquet/geo.rs='s =crs_projjson=) and, as of R4, into Shapefile's =.prj=
+  writer (=src/crs.rs='s =NamedCrs::registry_wkt=, called from
+  =shapefile/writer.rs='s =prj_wkt= when a bare authority+code has no WKT of its
+  own) — =def_wkt='s first consumer (GeoPackage/FlatGeobuf's own WKT slots are
+  already satisfied by the source's own =NamedCrs.wkt= when present, so they
+  never needed it).
+- =src/parquet/geo.rs= :: =crs_projjson= — GeoParquet CRS emission (the main
+  consumer of the translation, and the R1/R2 routing target).
+- =tests/fixtures/gen_wkt1_crosswalk.py=, =gen_projected_wkt2.sh= :: build-time
+  generators for the crosswalk tables + oracle fixtures (need =proj.db= +
+  =projinfo=).
+- =tests/fixtures/projected_wkt1.tsv= (622), =projected_wkt2.tsv= (473) :: milestone-C
+  oracle fixtures. =esri_geographic_wkt1.tsv= (431) / =esri_projected_wkt1.tsv=
+  (2 274) :: R2's bulk-oracle fixtures — every native ESRI geographic/projected
+  CRS, real id-less =WKT1_ESRI= text, generated by
+  =geosetta-crs-data/tools/gen_esri_geographic_fixtures.py= /
+  =gen_esri_projected_fixtures.py=.
+- =plans/crs.org= :: milestones A/B/C (done) + D/reverse (now superseded by the
+  registry). =plans/shapefile.org= :: the full Shapefile format-spoke plan
+  (geometry, =.dbf= attributes, =.prj= CRS); this *is* =crs-registry.org='s R4,
+  written up in the main crate's plans dir since most of it (geometry/DBF) has
+  no CRS dependency. *DONE* (2026-08-12). =plans/README.org= indexes both.
+- =src/shapefile/{mod,geometry,dbf,reader,writer}.rs= :: NEW, IMPLEMENTED
+  (uncommitted) — the Shapefile spoke. =geometry.rs= is the mixed-endian
+  =.shp=/=.shx= codec plus ring classification (shoelace winding +
+  appearance-order containment) for the Polygon/MultiPolygon disambiguation;
+  =dbf.rs= is the dBase attribute codec (=.cpg=/Latin-1 fallback); =reader.rs=/
+  =writer.rs= assemble/split the sibling-file set, =.prj= going straight through
+  =Crs::from_authority_code= with no new CRS code. Public (=pub mod shapefile=,
+  like =geopackage=), since Shapefile is multi-file and bypasses
+  =convert::read_features=/=write_features= the same way GeoPackage does — see §
+  SHAPEFILE (R4) MILESTONE DETAIL.
+
+*** Key files — geosetta-crs-data (this dir)
+- =crs-registry.org= :: *THE design plan.* Read it in full. Milestones R1–R5,
+  identity recovery + validation, sizes, degraded-mode contract, attribution.
+- =registry-format.org= :: *THE container-format spec* (=GCR1=, now =v2= — see
+  its § V1→V2). Byte layout, string codes, self-describing header, the
+  user-built-blob licensing analysis.
+- =src/lib.rs= :: hand-written accessors (=REGISTRY_BLOB_ZSTD=,
+  =REGISTRY_BLOB_RAW_SIZE=, =NAMES=, =DATASET_VERSIONS=, =CRS_COUNT=), re-exporting
+  from the generated modules below.
+- =src/generated.rs= (blob + sizes + versions) and =src/names.rs= (=NAMES=,
+  20 760 entries) :: *GENERATED* — overwritten by the generator; never hand-edit.
+- =src/registry.bin.zst= :: the =GCR1= =v2= blob (*1.07 MB*, up from 637 KB
+  at R1 — R5 added WKT2:2019 for all 13 790 CRSes), =include_bytes!='d by
+  =generated.rs=.
+- =tools/gen_crs_registry.py= :: generator *implemented* — reads =proj.db= +
+  =projinfo=, emits the =GCR1= v2 blob (PROJJSON + WKT1 + WKT2, R1+R5) + Rust
+  mirrors (=--limit=/=--jobs=/=--keep-raw=; ~55 s at =--jobs 12=). Rerun to
+  regenerate.
+- =tools/gen_esri_geographic_fixtures.py= / =gen_esri_projected_fixtures.py= ::
+  emit =geosetta/tests/fixtures/esri_geographic_wkt1.tsv= (431) /
+  =esri_projected_wkt1.tsv= (2 274), R2's bulk-oracle fixtures — every native
+  ESRI geographic/projected CRS, real id-less =WKT1_ESRI= exports. Rerun if
+  =proj.db='s ESRI geographic/projected set changes.
+- =NOTICE=, =LICENSE=, =LICENSES/Apache-2.0.txt= :: multi-source attribution
+  (already drafted; Apache text is a placeholder).
+
+** WHAT IS COMMITTED vs UNCOMMITTED  (important)
+=main= (=github.com/dxgeo/geosetta=) has milestones A/B/C at =v0.20.0=. The
+=geosetta= *working tree is intentionally dirty* — the user commits deliberately,
+so these are NOT yet committed:
+- *Oracle cap increase* (a clean win, verified): WKT2 per-method cap 15→50 (268→
+  *473 fixtures*, 473/473 @100%); WKT1 cap 120→200 (437→*622 fixtures*, 622/622
+  @100%, GDAL-only). Regenerated =wkt1_tables.rs= + both =.tsv=. Also made
+  =en_default_safe= *population-based* (see gotchas).
+- *crs-registry wiring*: =Cargo.toml= (optional =geosetta-crs-data= dep + non-default
+  =crs-registry= feature), =src/crs.rs= (=#[cfg(feature)] mod registry;=,
+  =NamedCrs::registry_projjson=, =parquet_expressible= now feature-aware, the
+  rebuild hint on =downgrade_warning='s GeoParquet branch; R5 adds
+  =NamedCrs::registry_wkt2= + a free =wgs84_registry_wkt2= for =Crs::Wgs84=),
+  =src/crs/registry.rs= (*reader implemented* — decode, header parse, binary
+  search, =def_projjson=/=def_wkt=, 5 fast tests + the full ignored bulk oracle;
+  R2's =resolve_geographic_by_name=/=resolve_projected_by_name= plus their two
+  bulk oracles land here too; R5 adds =def_wkt2=, =v2='s =Record= fields, 3 fast
+  tests, and its own bulk oracle + =KNOWN_WKT2_IDENTIFY_GAPS=),
+  =src/parquet/geo.rs= (=crs_projjson= tries =registry_projjson= before WKT
+  translation), =src/geopackage/writer.rs= (R5: =definition_12_063= column on
+  =gpkg_spatial_ref_sys=, a =gpkg_extensions= declaration row, plus a small
+  refactor generalizing =gpkg_extensions= row-building — was RTree-only,
+  =rtree::extensions_table= now =rtree::extension_rows= returning plain rows
+  that =writer.rs= combines with any other active extension's rows into one
+  table), =plans/README.org=. All of R1 (steps 1–4), R2 (both scopes), and R5
+  land here.
+- *Shapefile spoke (R4), fully implemented*: =src/shapefile/{mod,geometry,dbf,
+  reader,writer}.rs= (new); =src/format.rs= (=Format::Shapefile=, =.shp=
+  extension); =src/crs.rs= (a =Format::Shapefile= =downgrade_warning= arm,
+  =NamedCrs::shapefile_expressible=/=registry_wkt=); =src/convert.rs=
+  (=Format::Shapefile= opts out of the single-buffer =read_features=/
+  =write_features= path, like =Gpkg=); =src/lib.rs= (=pub mod shapefile=, public
+  like =geopackage= since main.rs needs its multi-file entry points directly);
+  =src/main.rs= (=read_input=/=write_collection=/=read_shapefile_from_path=/
+  =write_shapefile_to_path=/=sibling_path= — Shapefile's multi-file I/O,
+  reused by =run_geopackage_read=/=run_geopackage_write= so GeoPackage↔Shapefile,
+  including multi-layer fan-out, composes for free); =plans/shapefile.org= +
+  =plans/README.org= (status flipped to DONE); seven real DuckDB-generated
+  fixture sets under =tests/fixtures/duckdb_{point,line,multiline,multipoint,
+  poly_hole,multipoly,crs_pt}.{shp,shx,dbf,prj}= (hand-verified against
+  =duckdb='s own =ST_Read=/=ST_AsText= before committing) plus their consuming
+  tests in =convert.rs=. See § SHAPEFILE (R4) MILESTONE DETAIL for the full
+  writeup.
+
+=geosetta-crs-data= is entirely uncommitted (no git). The R1 generator work added:
+=tools/gen_crs_registry.py= (implemented, and since fixed — see KEY FINDINGS
+=usages= bug), the generated =src/registry.bin.zst= (regenerated after the
+fix), =src/generated.rs=, =src/names.rs=, the =GCR1= spec =registry-format.org=,
+and the =lib.rs= refactor (string-code =NAMES=, new =REGISTRY_BLOB_RAW_SIZE=).
+R2 added =tools/gen_esri_geographic_fixtures.py=/=gen_esri_projected_fixtures.py=
+(no changes to the generator itself, only new fixture-emitting scripts). R5
+(2026-08-12) bumped =gen_crs_registry.py= to =GCR1= =v2= (WKT2:2019 export +
+=parse_sections= rewritten to fix the embedded-newline truncation bug — see
+KEY FINDINGS) and regenerated =registry.bin.zst= to *1.07 MB* (up from 637 KB).
+Default + =--features crs-registry= build; all 189 geosetta tests pass default,
+210 pass with =crs-registry= (+21 over default: reader/resolver/GeoPackage unit
+tests across R1/R2/R5, +6 ignored bulk oracles).
+
+** THE DECISION / PIVOT (why the registry)
+Structural WKT→PROJJSON is only reliable when the input is *complete + carries an
+authority id* (WKT2 always; GDAL WKT1 via the oracle-gated crosswalk). It *breaks*
+on id-less inputs — the case that matters for the *Shapefile* spoke (now DONE,
+see § SHAPEFILE (R4) MILESTONE DETAIL), whose =.prj= is *Esri-flavor WKT1* (no
+id, no =AXIS=, non-standard datum names).
+Verified: id-less Esri geographic mis-identifies (NAD83 → EPSG:9309, WGS84 → 70%);
+projected Esri is axis-ambiguous and declines. Root cause is the *missing id*, not
+parsing. The fix is *name → (authority, code) → authoritative definition*, all
+derivable at build time from =proj.db=. See =crs-registry.org= for the full
+argument, sizes, and identity-recovery/validation design.
+
+** KEY FINDINGS (so you don't relearn them the hard way)
+- *The id does NOT override a wrong axis order.* Forcing easting/northing on a
+  north/east CRS (EPSG:3034) identifies at 25–50 % *even with the correct id* —
+  PROJ validates structure vs. the id. So projected CRSes need the *real* axis
+  order; you can't shortcut it.
+- *name→code resolves cleanly.* =proj.db='s =alias_name= (=source='ESRI'=) +
+  each CRS table's =name= column map names→codes; a prototype resolved 7/7 of the
+  hard Esri cases at 100 %.
+- *Full universe = 13 790 CRSes* (all authorities: EPSG 7724, ESRI 2991, IAU_2015
+  2201, IGNF 864, OGC 4, PROJ 4, NKG 2; all types). Embedded as compact
+  PROJJSON+WKT1; *AS-BUILT with =zstd -19= = 637 KB* (28.7 MB raw) — well under the
+  ~2.27 MB gzip estimate. *457* CRSes (3.3 %) have no faithful WKT1 (=has_wkt=0=;
+  PROJJSON only → WKT2 deferred to R5).
+- *Codes are STRINGS, not integers.* =IGNF= (864), =OGC=, =PROJ=, =NKG= use
+  alphanumeric codes (=OGC:CRS84=, =IGNF:AMANU49G=, max 26 chars). The skeleton's
+  =NAMES: …i64= was a latent bug — now =(&str name, &str auth, &str code)=; the
+  =GCR1= key is =(auth_id, code_bytes)=. *Don't reintroduce an integer code type.*
+- *Generator gotcha (fixed): =projinfo= prints per-format sections; a format it
+  can't emit (WKT1 for Geographic-3D etc.) leaves an *empty stdout section* and puts
+  the reason on *stderr*.* A naive "next non-empty line" parser spills into the next
+  section (once stored =PROJJSON:= as the WKT value). =parse_sections= must not cross
+  header boundaries — this is why the first run wrongly reported =no WKT1: 0=.
+- *zstd compatibility is confirmed.* geosetta's from-scratch =compress/zstd.rs=
+  decodes the =zstd -19= blob exactly, including a 28.7 MB multi-block frame with
+  cross-block back-references. Compress with the =zstd= CLI at =-19=, *no* =--long=,
+  *no* dictionary (the decoder handles a single plain frame only).
+- *Generator gotcha #2 (found + fixed by the full oracle run): the plural
+  =\"usages\"= array survived stripping as empty objects.* =STRIP_KEYS= removed
+  =scope=/=area=/=bbox= recursively but not the *container* key =usages= (used
+  when a CRS has multiple scope/area pairs), so =strip_usage= emptied each
+  element to =\{\}= and left =\"usages\":[\{\},\{\}]= — structurally invalid
+  PROJJSON that =projinfo= rejects outright ("missing children in usages
+  child"). Fixed by adding =usages= to =STRIP_KEYS= (it's whole-key strippable,
+  same as the singular fields); blob regenerated. *This only showed up once the
+  reader existed and the full 13 790-entry oracle actually ran* — the earlier
+  single-lookup smoke test (=EPSG:3857=) couldn't have caught it. *Lesson: don't
+  trust a generator's "DONE" status until its own oracle has run end-to-end
+  against the real reader, not a throwaway prototype.*
+- *=projinfo --identify= cannot reach literal 100% over the whole universe, and
+  that's not a bug.* After the =usages= fix, the full-registry oracle is
+  13 756/13 790 (99.75%) @ 100%; the other 34 are a proven =projinfo= limitation
+  (verified by feeding =projinfo=' own unstripped, authoritative export back into
+  =--identify= and getting the identical result): (1) *all 15* EPSG
+  =EngineeringCRS= entries — =--identify= returns zero matches for the whole
+  type, categorically; (2) 19 ESRI UTM-zone/Alaska-system codes that are exact
+  numeric duplicates of an EPSG CRS — =--identify= reports the EPSG twin at
+  70–90% instead of the ESRI code at 100%. Encoded as an exhaustive
+  =KNOWN_IDENTIFY_GAPS= allowlist in =registry.rs='s oracle test (asserts no
+  *unexpected* failure and no *stale* exception — not a blanket tolerance). User
+  decision (2026-08-12): allowlist over a bare threshold, so any *new* gap still
+  fails loud.
+- *Esri structural translation was TRIED AND REVERTED — do not re-attempt it.*
+  Adding Esri to the crosswalk yielded *0* safely-verifiable oracle fixtures under
+  strict-fallback (Esri omits =AXIS=, so nearly every real Esri CRS is
+  axis-ambiguous; Web Mercator's aux-sphere param has no EPSG equivalent). The
+  registry (name→code) is the right tool, not more structural parsing.
+- *=en_default_safe= must be population-based.* It gates whether a no-=AXIS= WKT1
+  may default to E/N; computing it from the sampled =cap= (not the full EPSG
+  population) mislabels undersampled non-EN methods. Already fixed in the
+  uncommitted generator; keep it population-based.
+- *=NamedCrs.code: Option<i64>= was a real gap, now fixed to =Option<String>=.*
+  Found while scoping R2: the IR couldn't represent IGNF/OGC/PROJ/NKG's
+  alphanumeric codes at all (=parse::<i64>()= calls silently dropped them, e.g.
+  =OGC:CRS84= embedded in a WKT id never got lifted). Fixed crate-wide
+  (=crs.rs=, both GeoPackage/FlatGeobuf readers+writers, GeoParquet's
+  =parse_crs=/=crs_projjson=, =convert.rs= tests). Two formats are *irreducibly*
+  numeric on disk regardless of the IR — GeoPackage's =srs_id=/
+  =organization_coordsys_id= are SQLite =INTEGER= columns (plus a raw i32 in
+  every geometry's GPB header) and FlatGeobuf's =Crs.code= is =int32= in its
+  FlatBuffers schema — so a non-numeric code now falls back gracefully (a
+  synthetic srs_id for GeoPackage, dropped-but-org/wkt-preserved for
+  FlatGeobuf) instead of failing to compile the type. GeoParquet's PROJJSON
+  =id.code= (int-or-string per spec) is now correct either way — this also
+  fixed a latent bug where an alphanumeric PROJJSON id silently failed to parse
+  via =as_f64()=, independent of the registry. Also fixed in passing: the WGS 84
+  collapse's OGC branch compared against the numeric =4326= (never true — OGC's
+  real code is the string =CRS84=); now checks =\"CRS84\"=. 156/162 tests pass
+  (default/feature, up from 152/158); real-file check (GDA2020 GeoPackage →
+  Parquet) confirmed byte-identical output before/after.
+- *R2 projected: the feared method/parameter crosswalk turned out to be
+  unnecessary — ellipsoid-only validation was enough (2026-08-12).* The
+  plan's own flagship measured wins (WGS 84/NAD83/NAD27, § WHY table) are all
+  geographic, where validating a name match needs only the ellipsoid's two
+  numbers (=semi_major_axis=, =inverse_flattening=). Projected was assumed to
+  need the *same* GDAL-vs-Esri method/parameter crosswalk that the earlier
+  structural-*translation* attempt found didn't generalize to Esri's spellings
+  ("TRIED AND REVERTED" finding, above) — repurposed for *validation* instead
+  of *translation*, but with the same unproven-coverage risk, so it was
+  deferred until R4 (Shapefile) produced real =.prj= fixtures to test against
+  instead of guessing blind. Once tested (=resolve_projected_by_name=,
+  =registry.rs=, plus a new 2 274-fixture bulk oracle over every native ESRI
+  projected CRS —
+  =geosetta-crs-data/tools/gen_esri_projected_fixtures.py= →
+  =geosetta/tests/fixtures/esri_projected_wkt1.tsv=), the cheaper hypothesis
+  won outright: validating *only* the base geographic CRS's ellipsoid (no
+  method/parameter check at all) resolves *2185/2274 (96%) at 100%, zero
+  wrong* — a higher resolution rate than geographic's own 76%. The reasoning
+  that makes this safe: a =NAMES= catalog-name match is already strong
+  evidence (each name is unique to one =(authority, code)= in =proj.db=); the
+  ellipsoid check exists to catch a same-spelled name landing on the wrong
+  *datum*, not to disambiguate *projection method* — so skipping the method
+  check doesn't introduce ambiguity the way it would have for structural
+  *translation* (which has to emit a specific method, not just accept-or-
+  decline a candidate). Axis order — the actual root cause that sank
+  projected *structural translation* (Esri omits =AXIS=, so translation had
+  to guess it) — was never at risk here either: name recovery only reads the
+  source WKT to *identify* which candidate to snap to; the emitted definition
+  is the registry's own authoritative one, correct axis by construction. The
+  11 "wrong-looking" results that did surface were re-checked and are exactly
+  R1's already-documented =KNOWN_IDENTIFY_GAPS= (Complex-UTM zones snapping to
+  their live EPSG twin over a deprecated ESRI code) — a =projinfo --identify=
+  limitation, not a resolver defect; the oracle now filters these the same
+  way R1's full-registry oracle does. *Lesson: an earlier "this will need a
+  crosswalk" prediction is worth re-testing empirically once real fixtures
+  exist, not treated as settled — the risk that killed structural
+  translation (method/parameter spelling gaps) didn't actually apply to
+  validation once measured.*
+- *PROJJSON's ellipsoid flattening comes in two spellings — handle both.*
+  Most ellipsoids carry =inverse_flattening= directly (matches WKT1
+  =SPHEROID='s convention), but some (e.g. Clarke 1866 / NAD27) carry
+  =semi_minor_axis= instead. Convert via =inverse_flattening = a / (a - b)=;
+  verified exactly against Esri's own NAD27 export (=294.978698213898=
+  computed from =a=6378206.4, b=6356583.8= matches to all given digits).
+  Also: WGS 84-style ensembles put =\"ellipsoid\"= once at the
+  =datum_ensemble= level (not per-member) — check =datum= first, fall back to
+  =datum_ensemble=, same shape either way.
+- *A WKT's outer name needs no normalization to hit =NAMES=.* Esri's literal
+  =GEOGCS[\"GCS_WGS_1984\", ...]= spelling round-trips exactly because
+  =gen_crs_registry.py='s =read_names()= already pulls =alias_name= rows
+  =WHERE source='ESRI'= — the exact string a real Esri =.prj= would carry is
+  already an index entry. No fuzzy matching, no crosswalk table needed for
+  this half of R2.
+- *At-scale validation matters, not just hand-picked examples.* A 431-fixture
+  bulk oracle (every native ESRI geographic CRS in =proj.db=, real id-less
+  =WKT1_ESRI= exports — =tools/gen_esri_geographic_fixtures.py= in this repo)
+  resolves 327/431 (76%) with *zero* wrong snaps; declines cluster around
+  auxiliary-sphere CRSes (a genuinely different ellipsoid — correctly
+  declining) and IAU_2015 planetary bodies (moons — not yet root-caused, low
+  priority since declining is already the safe outcome). Confirms the
+  strict-fallback discipline holds under real breadth, not just the three
+  cases the plan happened to measure by hand.
+- *R3's "delete what the registry makes redundant" framing is a trap for the
+  default build — don't implement it literally.* =geosetta/src/crs.rs= only
+  feature-gates the registry module itself (=#[cfg(feature = "crs-registry")]
+  mod registry;=); =wkt_projjson.rs=/=wkt1_tables.rs= (the structural crosswalk)
+  are compiled *unconditionally*, shared by both builds. The default
+  (=crs-registry=-off) build has *no* fallback if crosswalk coverage is
+  deleted — it's the default build's *only* resolution mechanism, not a
+  redundant validator, for anyone without the feature on. Any literal
+  deletion of crosswalk entries "because the registry covers that code" would
+  silently regress default-build correctness with nothing to replace it,
+  directly breaking the degraded-mode contract's own promise. Two honest
+  versions of R3: (a) don't delete anything — R1/R2's priority ordering
+  (registry tried first) already achieves "structural path becomes
+  validator/fallback" in *behavior*, so R3 is largely already done; or (b)
+  feature-gate the crosswalk itself so each build gets its own coverage —
+  materially bigger (two maintained crosswalk surfaces) and doesn't even
+  shrink the default build, only the feature build's compiled size. Treat R3
+  as low-value/high-risk relative to R4 until re-scoped.
+- *=--single-line= is not a hard guarantee — a handful of EPSG =AREA=
+  descriptions carry a literal embedded newline byte in the source data
+  itself, found by R5's WKT2 bulk oracle (2026-08-12).* Two EPSG codes
+  (=32075=/=32665=, sharing the "Gulf of Mexico ... Amery Terrace" area) had
+  their WKT2 silently truncated mid-string by =gen_crs_registry.py='s
+  line-based =parse_sections=, which took only the *first* non-empty line per
+  section — the embedded newline split one logical section across two
+  physical lines with *no* blank-line separator (a real separator between
+  *different* sections always has one), so the second physical line was
+  dropped rather than appended. Root-caused by directly reproducing one
+  failing =projinfo= call and diffing line counts, not by guessing. Fixed by
+  rewriting =parse_sections= to *accumulate* lines until the next real header
+  (a blank line only closes a section once content has started) — this is
+  the second time a generator "DONE" status turned out to be wrong only once
+  the full bulk oracle actually ran (see the =usages= bug, R1), not a
+  smaller smoke test. *Lesson, restated because it needed restating:* run the
+  real oracle before trusting a generator, every time a generator changes,
+  not just once.
+- *A code can self-identify via PROJJSON but not via WKT2 — these are
+  disjoint =projinfo --identify= gap sets, not the same gap in two dialects
+  (found by R5's oracle, 2026-08-12).* 21 ESRI codes (20 deprecated
+  geographic CRSes with a live successor, plus =ESRI:102113='s aux-sphere Web
+  Mercator ambiguity — the same *kind* of ambiguity as R1's ESRI-UTM-
+  duplicate gaps, just against WKT2) resolve at 100% via their PROJJSON but
+  only 25–70% via their own WKT2 — verified individually (e.g.
+  =ESRI:104009=) by feeding each serialization back into =--identify=
+  separately. Conversely, R1's original 34 =KNOWN_IDENTIFY_GAPS= (mostly
+  EngineeringCRS + exact-EPSG-duplicate ESRI codes) turned out to be
+  *format-independent* — they fail under WKT2 too, not a PROJJSON quirk as
+  the R1 writeup's phrasing might suggest in isolation. Net: two allowlists
+  (=KNOWN_IDENTIFY_GAPS=, =KNOWN_WKT2_IDENTIFY_GAPS= in =registry.rs=), the
+  WKT2 oracle checks membership in *either*, and *don't assume a gap found
+  under one serialization automatically explains a gap under another* — each
+  needs its own oracle run to confirm, which is exactly why R5 built one
+  instead of reusing R1's verbatim.
+
+** HOW TO VERIFY / RUN THINGS
+- Build states (from =~/Projects/geosetta=):
+  - =cargo build= :: default, must stay *dependency-free* (dep tree = just
+    =geosetta=).
+  - =cargo build --features crs-registry= :: pulls the sibling crate only.
+  - =cargo test= :: 189 tests default, 210 with =--features crs-registry=, all
+    pass (includes the Shapefile spoke's fixture-backed tests — real DuckDB-
+    generated =.shp=/=.shx=/=.dbf=/=.prj= sets under =tests/fixtures/duckdb_*=).
+- *Bulk oracles* (the correctness gate; =#[ignore]=, need =projinfo= on PATH):
+  #+begin_src sh
+  cargo test --lib bulk_oracle -- --ignored --nocapture
+  #+end_src
+  =bulk_oracle_wkt2_projected_identifies= (473/473) and
+  =bulk_oracle_wkt1_projected_identifies= (622/622) — each translates a real-EPSG
+  slice and asserts =projinfo --identify= at *100 %*. =bulk_oracle_every_entry_identifies=
+  (13 756/13 790 @ 100%, 34 documented exceptions) covers the R1 registry itself.
+  =bulk_oracle_esri_geographic_name_recovery= (327/431 resolved, *0* wrong) and
+  =bulk_oracle_esri_projected_name_recovery= (2185/2274 resolved, *0* wrong) cover
+  R2's name recovery, geographic and projected — the hard bar is zero-wrong, not
+  a resolution-rate percentage (declining is the correct, safe outcome for
+  anything that doesn't validate). =bulk_oracle_every_entry_wkt2_identifies_and_
+  covers_wkt1_gap= (13 790/13 790 covered, 13 735 @ 100%, 55 documented
+  exceptions across =KNOWN_IDENTIFY_GAPS=/=KNOWN_WKT2_IDENTIFY_GAPS=) covers R5.
+  The 100% self-identify bar (or 0-wrong, for R2) is the project's hard rule;
+  keep any new work green. *Runtime:* the full-registry oracles (R1's and R5's)
+  each take ~7 minutes (~13.8k =projinfo= invocations); running both plus the
+  four smaller ones is a ~15-minute pass — build in that expectation when
+  planning a maintenance/regeneration session (see § MAINTAINABILITY below).
+- Tooling: PROJ from Homebrew — =proj.db= at =/opt/homebrew/share/proj/proj.db=;
+  version keys live in its =metadata= table (EPSG =v12.029=, PROJ =9.8.1=, ESRI
+  =ArcGIS Pro 3.6=, IGNF =3.1.0=). GDAL/PROJ is a *build-time codegen tool only* —
+  never a runtime/link dependency.
+
+** MAINTAINABILITY — detecting upstream drift (not yet implemented, 2026-08-12)
+=proj.db= isn't static — EPSG/ESRI/IGNF/PROJ release periodically, adding
+CRSes, editing definitions, deprecating codes. Two different concerns, both
+currently underserved:
+
+*** What already exists (correctness, once you've decided to regenerate)
+- =DATASET_VERSIONS= (blob + =generated.rs= mirror) stamps EPSG/PROJ/ESRI/
+  IGNF/NKG version numbers straight from =proj.db='s own =metadata= table,
+  plus a generation date. Rerunning the generator against a newer =proj.db=
+  and diffing this tells you immediately whether the *source* moved, and to
+  what version.
+- =CRS_COUNT= is checked against the blob header on every =cargo test= (fast,
+  not =#[ignore]='d) — free drift detection on total entry count, no manual
+  step needed.
+- The bulk oracles (§ HOW TO VERIFY above) are the actual correctness gate:
+  rerun after any regeneration and they fail loud if anything stops
+  self-identifying.
+- =KNOWN_IDENTIFY_GAPS=/=KNOWN_WKT2_IDENTIFY_GAPS= are *exhaustive*, not
+  tolerant — a new gap fails the oracle, and a *stale* (now-fixed) one also
+  fails ("on the list but now passes — remove it"). This is already the right
+  shape for catching drift precisely, not just tolerating a bulk pass rate.
+
+*** The actual gap: nothing says *what* changed between two runs
+None of the above tells you *which* CRSes were added, which definitions were
+edited, or whether a name→code mapping shifted — only that the count changed
+or the oracle now fails somewhere. This is compounded by =geosetta-crs-data=
+not being under git yet (intentional so far, but a real blocker here): even a
+plain =git diff= on =generated.rs=/=names.rs= after a regen would surface a
+lot of this for free (line-level adds/removes in =NAMES=, a =DATASET_VERSIONS=
+diff, a =CRS_COUNT= diff) — there's currently nothing to diff *against*.
+
+*** Recommended workflow (discussed with the user 2026-08-12, not yet built)
+1. *Put =geosetta-crs-data= under git.* Makes every future regeneration
+   diffable for free — no new tooling required for the count/version-level
+   signal, just =git diff= after rerunning the generator.
+2. *A change-summary mode in the generator.* On regen, compare the new entry
+   set against a lightweight manifest (=auth:code → hash-of-definition=)
+   committed alongside the blob, and print added/removed/changed codes
+   instead of just the aggregate counts =gen_crs_registry.py= prints today.
+   Not yet built — a next step if/when this becomes a live maintenance need.
+3. *A documented runbook* (a section here or in a new =MAINTENANCE.org=):
+   when PROJ/EPSG updates, (a) rerun the generator against the new =proj.db=,
+   (b) check the =DATASET_VERSIONS= diff, (c) run the full =#[ignore]='d
+   oracle suite (~15 min, see § HOW TO VERIFY), (d) review any new or stale
+   allowlist entries by hand, (e) commit. Not yet written down as a formal
+   runbook — this bullet list is the seed of it.
+
+None of this is implemented yet — flagging it here so a future agent (or the
+user) doesn't have to re-derive the reasoning; pick up at step 1 if/when this
+becomes active work.
+
+** DEGRADED-MODE CONTRACT (feature off vs on)
+Conversion never fails either way; only CRS-resolution fidelity changes.
+- *Without =crs-registry=* (pure-MIT): handle *WKT2 + certain WKT1* (the
+  oracle-gated crosswalk) structurally, as today. "Bad" WKT1 (id-less Esri,
+  ambiguous, no-AXIS non-EN) and bare codes → *id-reference + warning*; the warning
+  gains a hint to rebuild with =--features crs-registry= (scoped to the GeoParquet
+  warning in =Crs::downgrade_warning=).
+- *With =crs-registry=*: registry → structural → warn; the hard cases resolve and
+  the hint stops firing. Structural becomes validator + custom-CRS fallback.
+
+** ATTRIBUTION (a release gate)
+Embedding =proj.db= ships multi-source data. Terms verified: PROJ (MIT), *Esri*
+projection-engine-db-doc (*Apache-2.0*), IGNF (IGN open licence), *EPSG/IOGP*
+(EPSG Terms of Use — redistribution/derived OK *with* the IOGP acknowledgement, no
+charge for the data, mark modifications), IAU/NKG (public geodesy). =NOTICE= is
+drafted in this dir. *Open item needing the user:* sign-off on the exact EPSG/IOGP
+=NOTICE= wording, and drop the real Apache-2.0 text into =LICENSES/=. If a source's
+terms ever block redistribution, scope that authority out and resolve via
+=proj.db='s =supersession= table.
+
+** R1 MILESTONE DETAIL (done; see TL;DR above for current overall status)
+All four R1 steps landed:
+1. *Reader* — =src/crs/registry.rs=: decodes the =GCR1= blob once into a
+   =OnceLock=, parses the header, and exposes =def_projjson(auth, code)= /
+   =def_wkt(auth, code)= -> =Option<&'static str>= (binary search on
+   =(auth_id, code_bytes)=). 5 fast unit tests (default lookups, non-EPSG
+   authorities, unknown-key decline, WKT-present-vs-absent, a full index
+   self-check).
+2. *GeoParquet routing* — =src/crs.rs='s =NamedCrs::registry_projjson= (feature-
+   gated, =None= off-feature); =src/parquet/geo.rs='s =crs_projjson= tries it
+   right after verbatim PROJJSON and before WKT translation
+   (registry → structural → warn); =parquet_expressible= includes it too. Real-file
+   verified (GDA2020/EPSG:7844 GeoPackage → Parquet): output is byte-identical
+   to the structural path where both apply — no regression.
+3. *Degraded-mode hint* — the =… rebuild with `--features crs-registry` …= clause
+   on =Crs::downgrade_warning='s GeoParquet id-reference branch,
+   =#[cfg(not(feature = "crs-registry"))]=.
+4. *Oracle* — the full 13 790-entry =projinfo --identify= round-trip
+   (=bulk_oracle_every_entry_identifies=, =#[ignore]=, ~7 min) passes:
+   13 756 @ 100%, 34 documented =KNOWN_IDENTIFY_GAPS= (see KEY FINDINGS), 0
+   unexpected, 0 stale. This run is also what caught the =usages=-stripping
+   generator bug (fixed, blob regenerated).
+
+Tests at R1 completion: default =cargo test= 152 passed; =--features crs-registry=
+158 passed (+6 over default: 5 registry.rs unit tests, 1 net new/changed crs.rs +
+parquet/geo.rs pair — several existing tests were split into
+=#[cfg(not(feature))]=/=#[cfg(feature)]= variants since the registry now
+resolves cases that used to warn, e.g. =parquet_warns_for_a_code_only_crs= vs.
+=parquet_resolves_a_code_only_crs_via_registry=). =cargo clippy= clean both ways.
+Counts post-R4/Shapefile: 189 / 203. Post-R2/projected: 189 / 206. *Current
+counts (post-R5, 2026-08-12): 189 / 210* (+4 over 206: 3 new fast unit tests
+for =def_wkt2= — covers-the-has_wkt-zero-gap, resolves-a-present-entry,
+unknown-declines — plus 1 new GeoPackage round-trip test,
+=geographic_3d_crs_gets_wkt2_extension_column=; default count unaffected, all
+of R5's new code is feature-gated same as R1/R2). 2 more =#[ignore]='d bulk
+oracles beyond the counted totals: =bulk_oracle_every_entry_wkt2_identifies_
+and_covers_wkt1_gap= (13 790/13 790 covered, 13 735 @ 100%, 55 documented
+gaps, 0 unexpected) — already run and green, not just written. =cargo clippy
+--all-targets= clean both ways — see § HOW TO VERIFY.
+
+*Next:* R2 (both scopes), R4, and now R5 are all done. Only *R3* remains,
+and it needs re-scoping before touching — see the KEY FINDINGS entry on its
+default-build risk; likely already achieved in behavior via R1/R2's
+try-order, not worth a literal crosswalk deletion.
+
+** SHAPEFILE (R4) MILESTONE DETAIL (done; implemented 2026-08-12)
+Full read+write =plans/shapefile.org= spoke, both directions, uncommitted (see
+§ WHAT IS COMMITTED vs UNCOMMITTED for the file list).
+- *Geometry* (=src/shapefile/geometry.rs=): mixed-endian =.shp=/=.shx= codec —
+  BE file/record headers, LE shape-record content, exactly as the ESRI spec
+  requires (no blanket endianness). Point/MultiPoint/LineString/
+  MultiLineString are a direct structural copy; Polygon/MultiPolygon needed
+  real geometry code — shoelace-formula signed area classifies each ring
+  (negative = clockwise = shell, positive = counter-clockwise = hole), and
+  rings are grouped into polygons by *appearance order* (a shell followed
+  immediately by its holes), not full point-in-polygon containment, per the
+  plan's own cost/benefit call — no fixture found yet that needs the fallback.
+  The writer *normalizes* winding on emit (shell forced CW, holes forced CCW)
+  regardless of input winding, so a round-tripped polygon can come back with
+  reversed-but-geometrically-identical ring vertex order — expected, not a
+  bug (unit tests use pre-wound fixtures to get bit-exact round trips).
+  Z/M/MultiPatch shape types are out of scope, matching the existing 2D-only
+  stance for GeoParquet/FlatGeobuf. A =.shp= can only declare *one* shape
+  family (Point xor MultiPoint xor PolyLine xor Polygon); writing a
+  =FeatureCollection= that mixes families, or contains a
+  =GeometryCollection= (Shapefile has no equivalent shape type at all),
+  errors rather than guessing — strict fallback, same rule as CRS.
+- *Attributes* (=src/shapefile/dbf.rs=): dBase III/IV codec. Field width is
+  data-driven (sized to the longest observed value per column, like
+  GeoParquet's schema inference), not fixed — Int64 capped at 20 bytes (full
+  =i64= range), Double at a fixed 6 decimals, String capped at DBF's 255-byte
+  limit with *silent truncation at a UTF-8 char boundary* (the plan's open
+  question on truncation policy — resolved this way since no other format in
+  the crate has a per-field width cap to set a stricter precedent). Encoding:
+  =.cpg= UTF-8 is honored exactly; anything else (or its absence, on a UTF-8
+  decode failure) falls back to a from-scratch Latin-1 decode (byte value =
+  Unicode code point) — not a real Windows-1252 table, a documented gap per
+  the plan's own open question, kept to stay dependency-free. Memo (=M=)
+  fields decode as =Null= (out of scope, needs a companion =.dbt=). Deleted
+  records (=.dbf='s 1-byte flag) are dropped in lockstep with their
+  same-position =.shp= record — =.shp= has no deletion flag of its own, so
+  =.dbf= and =.shp= must be skipped together by row index, not independently.
+- *CRS* (=.prj=): needed *zero new CRS code*, exactly as the plan predicted —
+  reading is a direct call to =Crs::from_authority_code(None, None, Some(wkt),
+  None)=, so R2's id-less-Esri-geographic name recovery activates automatically
+  the moment =.prj= bytes reach it. Writing prefers the source's own verbatim
+  WKT, else — with =crs-registry= on — =NamedCrs::registry_wkt= (=def_wkt='s
+  first consumer); a =Crs::Wgs84= source writes a hardcoded canonical
+  Esri-flavor WGS 84 WKT1 string (the exact id-less text real Esri =.prj=
+  files carry — no registry needed for the common case). *Gotcha found via
+  manual CLI testing, not a bug*: writing =Crs::Wgs84= to =.prj= and reading it
+  back does *not* recover =Crs::Wgs84= without =crs-registry= on — the written
+  text has no =AUTHORITY= node (matching real Esri files), so
+  =from_authority_code='s WKT-id-lift finds nothing and it comes back as an
+  id-less =Crs::Named=. A subsequent GeoJSON conversion of that round-tripped
+  value then warns ("source CRS is the source CRS" — =NamedCrs::label='s
+  existing fallback text for an all-=None= CRS, pre-existing/tested elsewhere,
+  just newly reachable via a real code path). This is the *intended* degraded-
+  mode behavior per the DEGRADED-MODE CONTRACT, not something to fix in the
+  Shapefile spoke — real GDAL/PROJ resolve this by name-matching the same way
+  R2 does, and even *with* =crs-registry= on, this specific GeoJSON warning
+  still fires, because =downgrade_warning='s =GeoJson= arm warns for any
+  non-collapsed =Crs::Named= unconditionally (registry recovery only feeds
+  per-target *expressibility* checks like =registry_projjson=/=registry_wkt=,
+  never the stored =Crs= variant's identity/collapse) — confirmed intentional
+  by checking =wgs84_never_warns='s existing test coverage, not a regression.
+- *Multi-file I/O* (=src/main.rs=): =read_input=/=write_collection= are the new
+  shared choke points — every call site that used to do
+  =std::fs::read=+=convert::read_features= or =convert::write_features=+
+  =std::fs::write= now goes through one of these, which special-case
+  =Format::Shapefile= (locate/write siblings by swapping =.shp='s extension,
+  trying the path's own case first then the opposite — real shapefiles mix
+  =.DBF=/=.dbf=) and fall through to the old behavior otherwise. This one
+  change is what makes GeoPackage↔Shapefile compose for free: =run_geopackage_
+  read='s per-layer write and =run_geopackage_write='s input read now call
+  these same helpers, so a multi-layer =.gpkg= → Shapefile conversion fans out
+  to one =layer.shp= sibling set per layer with no GeoPackage-side code
+  aware of Shapefile specifically.
+- *Testing*: real =.shp=/=.shx=/=.dbf=(+=.prj=) fixtures per geometry type,
+  generated via DuckDB spatial (=COPY ... TO 'x.shp' WITH (FORMAT GDAL, DRIVER
+  'ESRI Shapefile')=, the same sourcing method as the FlatGeobuf/GeoPackage
+  fixtures), hand-verified against =duckdb='s own =ST_Read=/=ST_AsText= before
+  being committed to =geosetta/tests/fixtures/=. =convert.rs= gained direct
+  =shapefile::read=/=write= tests (Shapefile isn't in the hub's single-buffer
+  path, so these call the spoke directly, mirroring =fgb_to_fc=) plus a
+  hub-payoff test (Shapefile → GeoParquet, a path never written explicitly).
+  Beyond the committed =cargo test= suite, the whole spoke was walked manually
+  via the real CLI binary against the DuckDB/GDAL oracle: every geometry
+  type's read, the write path (DuckDB re-reading our output), GeoPackage↔
+  Shapefile both directions including multi-layer fan-out, the mixed-shape-
+  family write error, and case-insensitive sibling lookup — all confirmed
+  correct.
+Tests: 189 passed default (up from 152 at R1 completion / 156 at R2), 203 with
+=--features crs-registry= (up from 158 / 170) — see § HOW TO VERIFY.
+=cargo clippy --all-targets= clean both ways.
+
+** CONVENTIONS / CONSTRAINTS
+- *Strict fallback:* never emit a wrong/guessed CRS — a wrong CRS is worse than an
+  unresolved one. Every translation is gated to =projinfo --identify= 100 %.
+- *Dependency-free by default:* the core =geosetta= crate must not gain runtime
+  deps; the registry is opt-in and its codec is Geosetta's own from-scratch zstd.
+- *Never reproject* — Geosetta labels/translates identity only.
+- *Commits:* the user commits deliberately (don't commit unbidden). *Do NOT add a
+  =Co-Authored-By= trailer* to commit messages in this project (explicit user
+  preference).
+- Plans are org-mode; match the house style.
+
+** OPEN QUESTIONS FOR THE USER
+- EPSG/IOGP =NOTICE= wording sign-off (release gate).
+- Whether/when to promote =crs-registry= to a *default* feature (plan says at R1).
