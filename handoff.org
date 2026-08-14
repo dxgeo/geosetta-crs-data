@@ -50,8 +50,9 @@ Esri) was never a risk for name *recovery*. *R3 has a real design tension* (not
 yet resolved — see KEY FINDINGS): its "delete what the registry makes
 redundant" framing would regress the *default* (=crs-registry=-off) build if
 taken literally, since the crosswalk it wants to trim is shared,
-unconditionally-compiled code, not feature-gated. *R4 is DONE* (implemented
-2026-08-12, uncommitted) — =geosetta/plans/shapefile.org= (full Shapefile:
+unconditionally-compiled code, not feature-gated. *R4 is DONE* (implemented and
+shipped 2026-08-12, in geosetta 0.21.0) — =geosetta/plans/shapefile.org= (full
+Shapefile:
 =.shp=/=.shx= geometry incl. ring-classification for Polygon/MultiPolygon,
 =.dbf= attributes, =.prj= CRS), registered in =plans/README.org=. Read+write,
 both directions, including GeoPackage↔Shapefile fan-out; =.prj= writing is the
@@ -86,7 +87,8 @@ CRSes' WKT2 — see KEY FINDINGS.
   milestone C. Contains the two =#[ignore]= *bulk oracles*.
 - =src/crs/wkt1_tables.rs= :: GENERATED WKT1→PROJJSON crosswalk tables (do not
   hand-edit).
-- =src/crs/registry.rs= :: *NEW, feature-gated, IMPLEMENTED* (uncommitted) — the
+- =src/crs/registry.rs= :: *NEW, feature-gated, IMPLEMENTED* (shipped in
+  geosetta 0.21.0) — the
   =GCR1= reader: =OnceLock=-decoded via =compress/zstd.rs=, binary-search lookup,
   =def_projjson=/=def_wkt= (R1); =resolve_geographic_by_name= / =resolve_projected_by_name=
   (R2, both scopes done) — name→code recovery validated against the WKT's
@@ -115,7 +117,8 @@ CRSes' WKT2 — see KEY FINDINGS.
   written up in the main crate's plans dir since most of it (geometry/DBF) has
   no CRS dependency. *DONE* (2026-08-12). =plans/README.org= indexes both.
 - =src/shapefile/{mod,geometry,dbf,reader,writer}.rs= :: NEW, IMPLEMENTED
-  (uncommitted) — the Shapefile spoke. =geometry.rs= is the mixed-endian
+  (shipped in geosetta 0.21.0) — the Shapefile spoke. =geometry.rs= is the
+  mixed-endian
   =.shp=/=.shx= codec plus ring classification (shoelace winding +
   appearance-order containment) for the Polygon/MultiPolygon disambiguation;
   =dbf.rs= is the dBase attribute codec (=.cpg=/Latin-1 fallback); =reader.rs=/
@@ -148,13 +151,24 @@ CRSes' WKT2 — see KEY FINDINGS.
   =esri_projected_wkt1.tsv= (2 274), R2's bulk-oracle fixtures — every native
   ESRI geographic/projected CRS, real id-less =WKT1_ESRI= exports. Rerun if
   =proj.db='s ESRI geographic/projected set changes.
-- =NOTICE=, =LICENSE=, =LICENSES/Apache-2.0.txt= :: multi-source attribution
-  (already drafted; Apache text is a placeholder).
+- =NOTICE=, =LICENSE=, =LICENSES/Apache-2.0.txt= :: multi-source attribution,
+  complete (the Apache 2.0 text is the real, full license, not a placeholder).
 
-** WHAT IS COMMITTED vs UNCOMMITTED  (important)
-=main= (=github.com/dxgeo/geosetta=) has milestones A/B/C at =v0.20.0=. The
-=geosetta= *working tree is intentionally dirty* — the user commits deliberately,
-so these are NOT yet committed:
+** WHAT WAS COMMITTED vs UNCOMMITTED AT HANDOFF TIME (2026-08-12, now historical)
+*Update:* everything this section originally described as uncommitted/pending
+has since landed. =geosetta= shipped this work in 0.21.0 (commit =402edbd=,
+"Add CRS registry name recovery, Shapefile support, WKT2") and bumped its
+=geosetta-crs-data= dependency to 0.1.1 in =b15551a=; =geosetta-crs-data= itself
+is now a real git repo with three commits, tagged =v0.1.0=/=v0.1.1=, and
+published on crates.io. Current version is geosetta 0.21.1. The section below
+is kept as a historical record of what changed in that session — check
+=git log= in each repo for current state rather than trusting the "committed"
+labels below.
+
+=main= (=github.com/dxgeo/geosetta=) had milestones A/B/C at =v0.20.0= as of
+this handoff. At the time, the =geosetta= *working tree was intentionally
+dirty* — the user commits deliberately — so these were NOT YET (but are now)
+committed:
 - *Oracle cap increase* (a clean win, verified): WKT2 per-method cap 15→50 (268→
   *473 fixtures*, 473/473 @100%); WKT1 cap 120→200 (437→*622 fixtures*, 622/622
   @100%, GDAL-only). Regenerated =wkt1_tables.rs= + both =.tsv=. Also made
@@ -195,7 +209,9 @@ so these are NOT yet committed:
   tests in =convert.rs=. See § SHAPEFILE (R4) MILESTONE DETAIL for the full
   writeup.
 
-=geosetta-crs-data= is entirely uncommitted (no git). The R1 generator work added:
+At handoff time, =geosetta-crs-data= was entirely uncommitted (no git); it has
+since been put under git, tagged =v0.1.0=/=v0.1.1=, and published to crates.io
+(see the update note above). The R1 generator work added:
 =tools/gen_crs_registry.py= (implemented, and since fixed — see KEY FINDINGS
 =usages= bug), the generated =src/registry.bin.zst= (regenerated after the
 fix), =src/generated.rs=, =src/names.rs=, the =GCR1= spec =registry-format.org=,
@@ -205,9 +221,10 @@ R2 added =tools/gen_esri_geographic_fixtures.py=/=gen_esri_projected_fixtures.py
 (2026-08-12) bumped =gen_crs_registry.py= to =GCR1= =v2= (WKT2:2019 export +
 =parse_sections= rewritten to fix the embedded-newline truncation bug — see
 KEY FINDINGS) and regenerated =registry.bin.zst= to *1.07 MB* (up from 637 KB).
-Default + =--features crs-registry= build; all 189 geosetta tests pass default,
-210 pass with =crs-registry= (+21 over default: reader/resolver/GeoPackage unit
-tests across R1/R2/R5, +6 ignored bulk oracles).
+Default + =--features crs-registry= build; as of geosetta 0.21.1, 191 tests
+pass default and 212 pass with =crs-registry= (these counts drift with each
+release — re-run =cargo test= / =cargo test --features crs-registry= for the
+current figures rather than trusting a snapshot here).
 
 ** THE DECISION / PIVOT (why the registry)
 Structural WKT→PROJJSON is only reliable when the input is *complete + carries an
@@ -280,7 +297,7 @@ argument, sizes, and identity-recovery/validation design.
 - *=en_default_safe= must be population-based.* It gates whether a no-=AXIS= WKT1
   may default to E/N; computing it from the sampled =cap= (not the full EPSG
   population) mislabels undersampled non-EN methods. Already fixed in the
-  uncommitted generator; keep it population-based.
+  generator; keep it population-based.
 - *=NamedCrs.code: Option<i64>= was a real gap, now fixed to =Option<String>=.*
   Found while scoping R2: the IR couldn't represent IGNF/OGC/PROJ/NKG's
   alphanumeric codes at all (=parse::<i64>()= calls silently dropped them, e.g.
@@ -449,7 +466,7 @@ argument, sizes, and identity-recovery/validation design.
   =ArcGIS Pro 3.6=, IGNF =3.1.0=). GDAL/PROJ is a *build-time codegen tool only* —
   never a runtime/link dependency.
 
-** MAINTAINABILITY — detecting upstream drift (not yet implemented, 2026-08-12)
+** MAINTAINABILITY — detecting upstream drift (partially implemented; discussed 2026-08-12)
 =proj.db= isn't static — EPSG/ESRI/IGNF/PROJ release periodically, adding
 CRSes, editing definitions, deprecating codes. Two different concerns, both
 currently underserved:
@@ -474,31 +491,29 @@ currently underserved:
 *** The actual gap: nothing says *what* changed between two runs
 None of the above tells you *which* CRSes were added, which definitions were
 edited, or whether a name→code mapping shifted — only that the count changed
-or the oracle now fails somewhere. This is compounded by =geosetta-crs-data=
-not being under git yet (intentional so far, but a real blocker here): even a
-plain =git diff= on =generated.rs=/=names.rs= after a regen would surface a
-lot of this for free (line-level adds/removes in =NAMES=, a =DATASET_VERSIONS=
-diff, a =CRS_COUNT= diff) — there's currently nothing to diff *against*.
+or the oracle now fails somewhere.
 
-*** Recommended workflow (discussed with the user 2026-08-12, not yet built)
-1. *Put =geosetta-crs-data= under git.* Makes every future regeneration
-   diffable for free — no new tooling required for the count/version-level
-   signal, just =git diff= after rerunning the generator.
+*** Recommended workflow (discussed with the user 2026-08-12)
+1. ~~Put =geosetta-crs-data= under git.~~ *Done* — the repo is now git-tracked,
+   tagged (=v0.1.0=, =v0.1.1=), and published to crates.io, so a plain
+   =git diff= on =generated.rs=/=names.rs= after a regen already surfaces a lot
+   of this for free (line-level adds/removes in =NAMES=, a =DATASET_VERSIONS=
+   diff, a =CRS_COUNT= diff).
 2. *A change-summary mode in the generator.* On regen, compare the new entry
    set against a lightweight manifest (=auth:code → hash-of-definition=)
    committed alongside the blob, and print added/removed/changed codes
    instead of just the aggregate counts =gen_crs_registry.py= prints today.
-   Not yet built — a next step if/when this becomes a live maintenance need.
+   Still not built — a next step if/when this becomes a live maintenance need.
 3. *A documented runbook* (a section here or in a new =MAINTENANCE.org=):
    when PROJ/EPSG updates, (a) rerun the generator against the new =proj.db=,
    (b) check the =DATASET_VERSIONS= diff, (c) run the full =#[ignore]='d
    oracle suite (~15 min, see § HOW TO VERIFY), (d) review any new or stale
-   allowlist entries by hand, (e) commit. Not yet written down as a formal
+   allowlist entries by hand, (e) commit. Still not written down as a formal
    runbook — this bullet list is the seed of it.
 
-None of this is implemented yet — flagging it here so a future agent (or the
-user) doesn't have to re-derive the reasoning; pick up at step 1 if/when this
-becomes active work.
+Steps 2 and 3 are not implemented yet — flagging it here so a future agent (or
+the user) doesn't have to re-derive the reasoning; pick up at step 2 if/when
+this becomes active work.
 
 ** DEGRADED-MODE CONTRACT (feature off vs on)
 Conversion never fails either way; only CRS-resolution fidelity changes.
@@ -565,9 +580,9 @@ and it needs re-scoping before touching — see the KEY FINDINGS entry on its
 default-build risk; likely already achieved in behavior via R1/R2's
 try-order, not worth a literal crosswalk deletion.
 
-** SHAPEFILE (R4) MILESTONE DETAIL (done; implemented 2026-08-12)
-Full read+write =plans/shapefile.org= spoke, both directions, uncommitted (see
-§ WHAT IS COMMITTED vs UNCOMMITTED for the file list).
+** SHAPEFILE (R4) MILESTONE DETAIL (done; implemented and shipped 2026-08-12, geosetta 0.21.0)
+Full read+write =plans/shapefile.org= spoke, both directions (see
+§ WHAT WAS COMMITTED vs UNCOMMITTED AT HANDOFF TIME for the file list).
 - *Geometry* (=src/shapefile/geometry.rs=): mixed-endian =.shp=/=.shx= codec —
   BE file/record headers, LE shape-record content, exactly as the ESRI spec
   requires (no blanket endianness). Point/MultiPoint/LineString/

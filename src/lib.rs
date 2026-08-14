@@ -1,6 +1,7 @@
 //! Embedded CRS registry data for Geosetta.
 //!
-//! CRS definitions (PROJJSON + WKT1) derived at build time from PROJ's `proj.db`,
+//! CRS definitions (PROJJSON + WKT1 + WKT2:2019) derived at build time from PROJ's
+//! `proj.db`,
 //! plus a name → (authority, code) index. This crate carries **only data and thin
 //! accessors** — decompression (zstd) and lookup live in `geosetta`, which uses
 //! its own from-scratch codecs. Keeping the data (and its third-party terms) in a
@@ -22,7 +23,7 @@ mod generated;
 mod names;
 
 /// The zstd-compressed `GCR1` registry blob (`(authority, code) → {PROJJSON,
-/// WKT1}`). Decoded by the consumer (`geosetta`) with its own zstd decoder, which
+/// WKT1, WKT2}`). Decoded by the consumer (`geosetta`) with its own zstd decoder, which
 /// needs the decompressed length — see [`REGISTRY_BLOB_RAW_SIZE`].
 ///
 /// Empty until the generator runs.

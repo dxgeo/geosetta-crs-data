@@ -339,14 +339,27 @@ registry's own authoritative definition (correct axis by construction) — the
 axis-order problem specifically belongs to translation, not lookup.
 
 *** R3. Retire the structural GeoParquet path for coded CRSes
-Route GeoParquet =crs= emission through =resolve= → =def_projjson=. Fold the
-milestone-C crosswalk into the *validator* role; delete what the registry makes
-redundant (measure the =wkt1_tables.rs= surface still needed for *custom* CRSes).
+*[PARTIALLY DONE.]* Routing GeoParquet =crs= emission through =resolve= →
+=def_projjson= before structural translation *is* done (=src/parquet/geo.rs='s
+=crs_projjson= tries =NamedCrs::registry_projjson= first, falling back to
+=wkt_to_projjson= only when the registry has no entry). What's *not* done:
+folding the milestone-C crosswalk into a pure validator role and deleting what
+the registry makes redundant — that has a real, unresolved design tension
+(see =handoff.org='s KEY FINDINGS): the crosswalk is shared,
+unconditionally-compiled code, so trimming it as originally framed would
+regress the *default* (=crs-registry=-off) build, which still needs it. Likely
+already achieved in behavior via R1/R2's try-order, not worth a literal
+crosswalk deletion — re-scope before touching further.
 
 *** R4. Shapefile CRS (the original driver)
-The Shapefile spoke's =.prj=: extract name → =resolve= → =def_projjson= for
-GeoParquet, =def_wkt= for GeoPackage/FGB, warning for GeoJSON/CSV/WKT.
-(Shapefile *geometry/attribute* reading is its own plan.)
+*[DONE — 2026-08-12.]* The Shapefile spoke's =.prj=: extract name → =resolve=
+→ =def_projjson= for GeoParquet (via R3's routing above), =def_wkt= for the
+=.prj= writer itself (=src/shapefile/writer.rs= calls
+=NamedCrs::registry_wkt=, =def_wkt='s first consumer), warning for
+GeoJSON/CSV/WKT. (GeoPackage/FlatGeobuf's own WKT slots are already satisfied
+by the source's own =NamedCrs.wkt= when present, so =def_wkt= was never wired
+there — not a gap, just no need.) (Shapefile *geometry/attribute* reading is
+its own plan, =geosetta/plans/shapefile.org=.)
 
 *** R5. WKT2 stored form
 *[DONE — 2026-08-12.]* Added WKT2:2019 to the blob and =def_wkt2=; wired the
