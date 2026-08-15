@@ -1,47 +1,113 @@
-# geosetta-crs-data
+# geoscribe
 
-Embedded **CRS registry data** for [Geosetta](https://github.com/dxgeo/geosetta):
-coordinate reference system definitions (PROJJSON + WKT1 + WKT2:2019) plus a
-name → (authority, code) index, covering **all 13,790 CRSes in PROJ's `proj.db`**
-— every authority (EPSG, ESRI, IGNF, OGC, IAU_2015 planetary, PROJ, NKG) and type.
+Embedded **CRS registry**: coordinate reference system definitions (PROJJSON +
+WKT1 + WKT2:2019) plus a name → (authority, code) index, covering **all 13,790
+CRSes in PROJ's `proj.db`** — every authority (EPSG, ESRI, IGNF, OGC, IAU_2015
+planetary, PROJ, NKG) and type. Originally built for
+[Geosetta](https://github.com/dxgeo/geosetta), but kept as a standalone,
+reusable registry rather than data owned by that crate.
 
-This crate exists to **isolate third-party data and its terms** from the core
-`geosetta` crate:
+This crate exists to **isolate third-party data and its terms** from
+consumers like `geosetta`, and to be the single owner of the `GCR1` decoder
+so no dependent needs to implement its own:
 
+- Decoding (zstd) and lookup are **owned here** (`resolve`/`resolve_by_name`/
+  `all`, see § Library usage below) — `geosetta`'s copy of this logic was deleted when
+  it switched to calling through. This crate still has **no external
+  dependencies**: its zstd decoder is its own from-scratch port, independent
+  of `geosetta`'s (a deliberate, documented duplication — see
+  `public-api.org` § MODULE LAYOUT — since `geosetta` also needs zstd for an
+  unrelated purpose, decoding GeoParquet's compressed pages).
 - The core `geosetta` crate stays **pure-MIT and dependency-free** by default. It
   pulls this crate in only under its opt-in `crs-registry` feature
-  (`--features crs-registry`).
-- All decoding (zstd) and lookup logic live in `geosetta`, using its own
-  from-scratch codecs — so this crate has **no dependencies** and holds only data
-  plus thin accessors (`REGISTRY_BLOB_ZSTD`, `NAMES`, `DATASET_VERSIONS`).
+  (`--features crs-registry`), where it's now a thin call-through.
 - The embedded **data** is a *derived* representation of PROJ/EPSG/Esri/IGN/IAU/NKG
   and is governed by those sources' terms — see [`NOTICE`](NOTICE). The Rust code
   is MIT (see [`LICENSE`](LICENSE)).
 
+## Library usage
+
+```toml
+# Cargo.toml
+[dependencies]
+geoscribe = "0.3.0"
+```
+
+```rust
+let rec = geoscribe::resolve("EPSG", "4326").expect("EPSG:4326 present");
+assert_eq!(rec.projjson.contains("WGS 84"), true);
+assert!(rec.wkt.is_some());  // None for the ~4% of entries WKT1 can't express
+assert!(rec.wkt2.is_some()); // present for effectively every entry
+
+for (authority, code) in geoscribe::resolve_by_name("GCS_WGS_1984") {
+    // multiple authorities can share a catalog name — validate before
+    // trusting a candidate; see public-api.org § BOUNDARY
+}
+```
+
+The full public surface is `resolve`, `resolve_by_name`, `all`, `CrsRecord`,
+`CRS_COUNT`, and `DATASET_VERSIONS` (see `src/lib.rs` doc comments and
+`public-api.org`).
+
+## CLI
+
+```
+$ geoscribe EPSG:4326                      # PROJJSON (default — the one every entry has)
+$ geoscribe EPSG:3857 --wkt2               # WKT2:2019
+$ geoscribe OGC:CRS84 --wkt                # WKT1 (GDAL flavor); errors if absent
+```
+
+Writes exactly the requested definition to stdout, nothing else — composes
+with anything that wants a WKT/PROJJSON string on a pipe or in a file, e.g.
+`ogr2ogr -a_srs $(geoscribe EPSG:4326)` or `geoscribe EPSG:3857 --wkt2 >
+crs.wkt`. Exit `1` with a message on stderr for an unknown code or a
+requested dialect the CRS doesn't have. Only does the trusted-id lookup
+(`resolve`), not the weaker-evidence `resolve_by_name` — see `src/main.rs`'s
+module doc comment for why.
+
+## Integration with Geosetta
+
+[Geosetta](https://github.com/dxgeo/geosetta) is this crate's original
+consumer and stays pure-MIT and dependency-free by default — it only pulls
+`geoscribe` in under its opt-in `crs-registry` Cargo feature, isolating this
+crate's third-party dataset terms from Geosetta's default build. See
+Geosetta's own README (`crs.rs` / `crs/` in § IMPLEMENTATION) or
+`project.org` for the specifics of how it's wired in and called.
+
 ## Status
 
-**Built and published** — `v0.2.0` on [crates.io](https://crates.io/crates/geosetta-crs-data)
-and [github.com/dxgeo/geosetta-crs-data](https://github.com/dxgeo/geosetta-crs-data).
+**Built, not yet published under this name.** `v0.2.0` shipped on crates.io
+under this crate's original name, `geosetta-crs-data`
+([crates.io](https://crates.io/crates/geosetta-crs-data)). The crate has
+since been renamed to its current name, `geoscribe`
+([github.com/dxgeo/geoscribe](https://github.com/dxgeo/geoscribe)) — GitHub
+rename done. Publishing `v0.3.0` (R6's public API added) under `geoscribe`
+to crates.io is next; once that's live, every `geosetta-crs-data` version
+will be yanked there to point dependents at the new name.
 The `GCR1` v2 blob (`src/registry.bin.zst`, 1.07 MB compressed) embeds
 PROJJSON + WKT1 + WKT2:2019 for all 13,790 `proj.db` CRSes, generated by
-`tools/gen_crs_registry.py`. Consumed by `geosetta` (`--features crs-registry`)
-for registry lookup (R1), id-less-WKT name recovery validated against ellipsoid
-params for geographic and projected CRSes (R2), and WKT2 CRS-WKT emission (R5).
+`tools/gen_crs_registry.py`. See § Integration with Geosetta above for how
+that's consumed downstream (R1, R2, R5).
 Full design plan: [`crs-registry.org`](crs-registry.org); container format:
-[`registry-format.org`](registry-format.org).
+[`registry-format.org`](registry-format.org); public API plan (R6, done):
+[`public-api.org`](public-api.org).
 
 ## Layout
 
 ```
-Cargo.toml            crate manifest (no dependencies)
-src/lib.rs            data accessors (REGISTRY_BLOB_ZSTD, NAMES, DATASET_VERSIONS, ...)
-src/generated.rs       generated: blob + sizes + versions
-src/names.rs           generated: name -> (authority, code) index (20,760 entries)
-src/registry.bin.zst   generated: the GCR1 v2 blob (1.07 MB, 13,790 CRSes)
-tools/                 build-time generators (need PROJ's projinfo + proj.db)
-crs-registry.org       the design plan
-registry-format.org    the GCR1 container-format spec
-NOTICE                 third-party data attributions and terms
-LICENSE                MIT (covers the Rust code only)
-LICENSES/               per-source license texts (Apache-2.0 for Esri)
+Cargo.toml             crate manifest (no external dependencies)
+src/lib.rs              public API: CrsRecord, resolve, resolve_by_name, all
+src/registry.rs          GCR1 decode + lookup internals
+src/zstd.rs              this crate's own zstd decoder (RFC 8878, from scratch)
+src/main.rs              the `geoscribe` CLI
+src/generated.rs         generated: blob + sizes + versions
+src/names.rs              generated: name -> (authority, code) index (20,760 entries)
+src/registry.bin.zst      generated: the GCR1 v2 blob (1.07 MB, 13,790 CRSes)
+tools/                  build-time generators (need PROJ's projinfo + proj.db)
+crs-registry.org        the design plan (R1-R5)
+registry-format.org     the GCR1 container-format spec
+public-api.org          the public API plan (R6)
+NOTICE                  third-party data attributions and terms
+LICENSE                 MIT (covers the Rust code only)
+LICENSES/                per-source license texts (Apache-2.0 for Esri)
 ```

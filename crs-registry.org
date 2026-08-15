@@ -163,7 +163,7 @@ authorities) is a separate, small, highly compressible artifact (=names.rs=,
 Consistent with the existing crosswalk generators: *GDAL/PROJ is a build-time
 codegen tool, never a runtime or link dependency.*
 
-- =geosetta-crs-data/tools/gen_crs_registry.py= reads =proj.db= + =projinfo= and
+- =geoscribe/tools/gen_crs_registry.py= reads =proj.db= + =projinfo= and
   emits, *into the sibling crate*:
   1. =src/registry.bin.zst= — the compressed *(authority, code) → {PROJJSON, WKT1}*
      blob (=include_bytes!='d by =src/lib.rs= as =REGISTRY_BLOB_ZSTD=; WKT1 omitted
@@ -184,11 +184,11 @@ The embedded data carries third-party dataset terms (§ ATTRIBUTION), so it is
 *isolated in a separate crate* and pulled into =geosetta= behind a Cargo feature.
 The core crate stays pure-MIT and dependency-free by default.
 
-- =geosetta-crs-data= (sibling crate) :: holds *only* the generated data + thin
+- =geoscribe= (sibling crate) :: holds *only* the generated data + thin
   accessors — the zstd blob (=REGISTRY_BLOB_ZSTD=), the =NAMES= index, and
   =DATASET_VERSIONS=. No dependencies. Carries its own =NOTICE= / =LICENSE= /
   =LICENSES/=. The generator (=tools/gen_crs_registry.py=) and this plan live here.
-- =geosetta='s =Cargo.toml= :: =geosetta-crs-data = { path = "…", optional = true }=
+- =geosetta='s =Cargo.toml= :: =geoscribe = { path = "…", optional = true }=
   behind a =crs-registry= feature (default-on at R1; the *default build stays
   dependency-free*).
 - =src/crs/registry.rs= (=#[cfg(feature = "crs-registry")]=) :: the lookup +
@@ -237,7 +237,7 @@ them Just Work. This is the degraded-mode contract R1/R2 implement.
 *** R1. The registry blob + reader + a working GeoParquet slice + the degraded-mode hint
 The first *end-to-end, honest* slice — enabling the feature must actually change an
 outcome, so R1 goes past a bare reader:
-1. *Generator + blob:* [DONE] =geosetta-crs-data/tools/gen_crs_registry.py= emits the
+1. *Generator + blob:* [DONE] =geoscribe/tools/gen_crs_registry.py= emits the
    =GCR1= blob (=registry.bin.zst=, see =registry-format.org=) for all 13 790 CRSes,
    the =NAMES= index (=names.rs=, 20 760 entries), and stamped =DATASET_VERSIONS= /
    =REGISTRY_BLOB_RAW_SIZE= / =CRS_COUNT= (=generated.rs=). Verified: geosetta's own
@@ -293,7 +293,7 @@ one exercising the =semi_minor_axis= conversion path exactly (Esri's
 =inverse_flattening=294.978698213898= derives from the same Clarke 1866
 ellipsoid the registry expresses as =semi_minor_axis=6356583.8=). *Bulk
 oracle* (=bulk_oracle_esri_geographic_name_recovery=, =#[ignore]=,
-=geosetta-crs-data/tools/gen_esri_geographic_fixtures.py= →
+=geoscribe/tools/gen_esri_geographic_fixtures.py= →
 =geosetta/tests/fixtures/esri_geographic_wkt1.tsv=): all *431* native ESRI
 geographic 2D CRSes in =proj.db=, real id-less =WKT1_ESRI= text. *327/431
 (76%) resolved, every one self-identifying at 100% via =projinfo --identify=
@@ -318,7 +318,7 @@ catalog-name match is strong evidence on its own, since each name is unique
 to its =(authority, code)=; the ellipsoid check exists to catch a
 same-spelled name landing on the wrong datum, not to disambiguate projection
 method. *Bulk oracle* (=bulk_oracle_esri_projected_name_recovery=,
-=#[ignore]=, =geosetta-crs-data/tools/gen_esri_projected_fixtures.py= →
+=#[ignore]=, =geoscribe/tools/gen_esri_projected_fixtures.py= →
 =geosetta/tests/fixtures/esri_projected_wkt1.tsv=, all *2 274* native ESRI
 projected CRSes in =proj.db=): *2185/2274 (96%) resolved@100%, 11 already-
 documented =KNOWN_IDENTIFY_GAPS= (R1's "exact numeric duplicate" =projinfo=

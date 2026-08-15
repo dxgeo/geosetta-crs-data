@@ -1,0 +1,193 @@
+#+TITLE: Plan: Public Resolve API (the data crate serves itself)
+#+AUTHOR: Daniel Okuniewicz Jr.
+#+DATE: {{{time(%Y-%m-%d)}}}
+
+* Public Resolve API
+
+** STATUS -- DONE (R6a-R6e all implemented and verified)
+Revises =crs-registry.org='s § MODULE LAYOUT, specifically this line: "*this
+crate holds only the generated data + thin accessors* ... *Decompression and
+lookup happen here* [in =geosetta=], using =geosetta='s own
+=compress/zstd.rs=." R1-R5 there are all =[DONE]= and their *outcomes* don't
+change -- this plan only relocates *who* decodes the blob, not what decoding
+it produces. The oracle from R1.4 (every embedded definition round-trips at
+=projinfo --identify=) is the regression guard that proves that, and it
+passed unchanged against the relocated decoder (=geoscribe='s own copy, run
+via =cargo test -p geoscribe -- --ignored=): 13,790/13,790 both as PROJJSON
+and as WKT2, zero unexpected failures, zero stale =KNOWN_IDENTIFY_GAPS=
+entries. =geosetta='s R2 name-recovery bulk oracles (431 geographic + 2,274
+projected real ESRI fixtures) also passed unchanged after switching to call
+through =geoscribe::resolve_by_name=. One deviation from the API SHAPE draft
+below, found during implementation: =resolve_by_name= returns an iterator
+over every candidate sharing a name, not a single =Option= -- geosetta's
+validation loop needs to try each candidate in turn, not just the first.
+=geoscribe= also gained a CLI (=src/main.rs=, not part of this plan's original
+scope but a natural extension of R6e's "bare consumer" point): =geoscribe
+EPSG:4326 [--wkt|--wkt2|--projjson]=, writing exactly the requested
+definition to stdout for piping into anything that wants a WKT/PROJJSON
+string.
+
+** WHY
+=geoscribe= ships =REGISTRY_BLOB_ZSTD= as raw bytes plus a format doc
+(=registry-format.org=) and expects the consumer to implement a
+spec-compliant =GCR1= decoder. That was a reasonable v1 shape with one
+consumer. It stops being reasonable with a second one: [[https://github.com/dxgeo/nazca][=nazca=]]
+(the standalone reprojection crate) also needs =(authority, code) ->
+definition= lookup, and =geosetta='s own implementation
+(=src/crs/registry.rs=) isn't reusable -- =NamedCrs::registry_wkt=/
+=registry_wkt2= are =pub(crate)=, confirmed by reading =geosetta/src/crs.rs=
+directly. =GCR1= is an in-house binary format with no external spec to
+conform to, so two independent decoders isn't redundancy for safety, it's
+just drift risk with no offsetting benefit. The crate that owns the format
+spec should own decoding it.
+
+Generation is explicitly *not* part of this problem -- =tools/gen_crs_registry.py=
+already works, is mechanical (reads =proj.db= + =projinfo=, never hand-copies
+data), and is already rerunnable against a newer =proj.db=. This plan is the
+decode/serve half only.
+
+** SCOPE
+- Move =GCR1= decode + lookup into =geoscribe=, behind a real public API.
+- Switch =geosetta='s =src/crs/registry.rs= to call that API instead of owning
+  decode logic.
+- *Out of scope*: the generator, an in-Rust encoder (parked separately --
+  see nazca's =plans/reprojection.org= § OPEN QUESTIONS for where that
+  thread left off), the =GCR1= format itself (version 2, unchanged), and
+  =nazca='s =proj-db= live-database backend (a different registry entirely,
+  not this blob).
+
+** API SHAPE
+
+#+begin_src rust
+// geoscribe/src/lib.rs
+#![forbid(unsafe_code)]
+
+mod zstd;      // ported from geosetta's compress/zstd.rs -- see § MODULE LAYOUT
+mod generated; // unchanged: REGISTRY_BLOB_ZSTD, REGISTRY_BLOB_RAW_SIZE, DATASET_VERSIONS, CRS_COUNT
+mod names;     // unchanged: NAMES
+
+/// A resolved CRS definition, in every authoritative form the registry
+/// stores for it. `wkt`/`wkt2` are `None` where PROJ can't express the CRS
+/// in that dialect (~4% of entries have no WKT1 -- see the generator's
+/// `no_wkt`/`no_wkt2` counters).
+pub struct CrsRecord {
+    pub authority: &'static str,
+    pub code: &'static str,
+    pub projjson: &'static str,
+    pub wkt: Option<&'static str>,
+    pub wkt2: Option<&'static str>,
+}
+
+/// Resolve by (authority, code) -- e.g. ("EPSG", "4326"). Binary searches
+/// the decoded index; decompresses the blob once on first call.
+pub fn resolve(authority: &str, code: &str) -> Option<CrsRecord>;
+
+/// Name -> (authority, code): every authority's official name plus Esri
+/// aliases (`NAMES`). Weaker evidence than an inline id -- callers that need
+/// the trust distinction §FEATURE-GATED BEHAVIOR draws (inline id trusted
+/// outright; name/param match validated before snapping) implement that
+/// policy themselves on top of this. This crate does one honest lookup, not
+/// a validation policy -- see § BOUNDARY below.
+pub fn resolve_by_name(name: &str) -> Option<(&'static str, &'static str)>;
+
+/// Every record -- bulk/oracle consumers (crosswalk generators, the
+/// projinfo --identify oracle itself).
+pub fn all() -> impl Iterator<Item = CrsRecord>;
+#+end_src
+
+=&'static str=, not owned =String= or =Cow=: matches what
+=NamedCrs::registry_wkt=/=registry_wkt2= already return today
+(=Option<&'static str>=), via the same one-time-decompress-then-leak pattern
+=registry.rs='s =OnceLock= reader already uses. Keeping the same return shape
+means =geosetta='s call sites need zero lifetime-shape changes when they
+switch from owning the lookup to calling through -- pure deletion on its
+side, not a rewrite.
+
+** MODULE LAYOUT (revision)
+- =geoscribe= :: *now also* the =GCR1= decoder and the public
+  =resolve=/=resolve_by_name=/=all= API. Gains its own copy of the hand-rolled
+  zstd decoder, *ported* from =geosetta='s =compress/zstd.rs=, not moved --
+  =geosetta= still needs its own copy independently, for decoding foreign
+  GeoParquet's ZSTD-compressed pages, which has nothing to do with the
+  =crs-registry= feature and can't depend on it. Two copies of a *generic*
+  zstd decoder is fine (it's a well-specified compression algorithm, not an
+  in-house format); two copies of *=GCR1=-specific* parsing was the actual
+  problem, and that part remains singly-owned here.
+- =geosetta/src/crs/registry.rs= :: shrinks to a thin call-through --
+  =def_projjson=/=def_wkt=/=def_wkt2= call =geoscribe::resolve= and
+  unwrap the field they need. The =OnceLock=-based decode-once caching and
+  =GCR1= index/parsing code in this file is *deleted*, not duplicated.
+  =resolve(&Crs) -> Option<(Authority, Code)>= -- the *identity recovery*
+  logic (inline id / name-match / structural-match, with the validation
+  =crs-registry.org= §80-105 specifies) -- *stays here*. That's policy about
+  which recovered candidate to trust, specific to how =geosetta= reads
+  format-specific inputs; it doesn't belong in a crate that has no concept
+  of GeoParquet, WKT1 =.prj= files, or any source format at all.
+
+** BOUNDARY -- what does *not* move
+Worth stating explicitly, since it's the natural next over-reach: this crate
+should stay a *dumb, honest lookup*, not grow the trust/validation policy
+that sits on top of it today (inline id trusted outright; a name or
+structural match validated against parameter tolerance before snapping --
+§ "Validation" in =crs-registry.org=). That policy is about *how much to
+trust a recovered candidate before accepting it*, which is meaningless
+without knowing what kind of input produced the candidate -- a concern that
+belongs to whichever format reader is doing the recovering (=geosetta= today,
+maybe others later), not to the registry itself. =resolve_by_name= returning
+a candidate is not the same claim as =resolve= returning a definition for a
+trusted id; keeping that distinction at the call site, not baked into this
+crate, is what keeps =geoscribe= reusable by a consumer with
+different trust needs.
+
+** MILESTONES
+- *R6a.* [DONE] Port the zstd decoder from =geosetta/src/compress/zstd.rs=
+  into =geoscribe/src/zstd.rs=. No behavior change -- same algorithm, new
+  home. Local error type (=DecodeError=) instead of =geosetta='s shared
+  =Error::Parquet=, since this crate has no crate-wide error type to reuse.
+- *R6b.* [DONE] =GCR1= index parsing + =resolve=/=resolve_by_name=/=all= live
+  in =geoscribe/src/registry.rs= (internals) + =src/lib.rs= (public surface),
+  reusing the old =OnceLock= decode-once pattern verbatim. Version bumped
+  =0.2.0= -> =0.3.0=.
+- *R6c.* [DONE] =geosetta='s R1.4 oracle (every embedded definition round-trips
+  at =projinfo --identify=) now lives in =geoscribe= itself
+  (=bulk_oracle_every_entry_identifies= / =..._wkt2_identifies_...=), run
+  against =geoscribe::resolve=/=all= instead of the old internal =Registry=.
+  Passes at 100% (13,790/13,790, both PROJJSON and WKT2) -- proves R6a/R6b
+  didn't change any output, only its location.
+- *R6d.* [DONE] =geosetta/src/crs/registry.rs= is now a thin call-through;
+  its decode/parsing code is deleted, not duplicated. Full =crs-registry=
+  test suite (49 tests) plus both R2 ESRI name-recovery bulk oracles (431
+  geographic + 2,274 projected real fixtures) pass with zero behavioral
+  drift.
+- *R6e.* [OPEN] Confirm a bare consumer with *no* dependency on =geosetta= --
+  =nazca=, or a throwaway smoke-test crate -- can depend on =geoscribe= alone
+  and resolve a real code. Deliberately deferred: =nazca= already has the
+  path-dep + =geoscribe= feature (from the rename pass) but nothing in its
+  own source calls through yet. This is the actual point of the plan --
+  treat it as the acceptance test, not an afterthought, when it's picked up.
+
+** RISKS / OPEN QUESTIONS
+- *Versioning.* Public API surface added means a real semver bump
+  (=0.2.0= -> =0.3.0=, not a patch), and =geosetta='s own =Cargo.toml=
+  version pin on =geoscribe= needs to move with it.
+- *Duplicate zstd decoder as a maintenance fact, not a bug.* Flagging this so
+  it isn't "cleaned up" later by someone merging the two copies back
+  together without noticing why they're separate -- see § MODULE LAYOUT.
+- *`all()`'s cost.* Iterating all 13 790 records materializes the whole
+  decoded index; fine for oracle/crosswalk-generator use, worth documenting
+  as not-for-hot-paths so a future caller doesn't reach for it per-feature
+  in a large conversion.
+
+** NON-GOALS
+- An in-Rust encoder / regeneration pipeline (separate, parked plan).
+- =nazca='s =proj-db= live-database backend -- a different registry (a real
+  on-disk =proj.db=, not this crate's embedded snapshot), unrelated to this API.
+- Any change to the =GCR1= format itself (still version =2=).
+- Baking identity-recovery/validation policy into this crate -- see § BOUNDARY.
+
+** RELATIONSHIP TO =crs-registry.org=
+Revises § MODULE LAYOUT and § FEATURE-GATED BEHAVIOR's implementation
+description only -- R1-R5's *behavior* and the oracle that certifies it are
+unchanged and remain this plan's regression guard. Numbered *R6* to continue
+that plan's sequence rather than forking a separate one, since it's the same
+registry, just with a second real consumer now.

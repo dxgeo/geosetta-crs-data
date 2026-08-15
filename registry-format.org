@@ -187,7 +187,7 @@ truth* for what the blob contains; the Rust =DATASET_VERSIONS= const is a mirror
    guarantees UTF-8).
 
 ** GENERATED RUST MIRROR (convenience, not source of truth)
-The generator also emits, into =geosetta-crs-data/src/=:
+The generator also emits, into =geoscribe/src/=:
 - =REGISTRY_BLOB_ZSTD= (=include_bytes!("registry.bin.zst")=) and the new
   =REGISTRY_BLOB_RAW_SIZE=.
 - =CRS_COUNT= and =DATASET_VERSIONS= — a cheap-access mirror of the header /
@@ -233,7 +233,7 @@ the *format* already supports it).
 *** Why this matters for licensing (see also =crs-registry.org= § ATTRIBUTION)
 Two distribution models, with materially different obligations:
 
-- *Model A — the project ships the pre-built blob* (=geosetta-crs-data= as
+- *Model A — the project ships the pre-built blob* (=geoscribe= as
   published). Here *the project is a redistributor* of EPSG/Esri/IGNF/… data, so it
   takes on all the propagating terms: the IOGP acknowledgement, "derived
   representation" marking, Esri Apache-2.0 =NOTICE=, "no charge for the data",

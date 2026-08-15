@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Generate the embedded CRS registry (GCR1 format) for geosetta-crs-data.
+"""Generate the embedded CRS registry (GCR1 format) for geoscribe.
 
 Build-time only — needs PROJ's ``projinfo`` + ``proj.db`` and the ``zstd`` CLI.
 GDAL/PROJ is a codegen tool here, never a runtime or link dependency: the emitted
 artifacts ship as static data, decoded by ``geosetta``'s own ``compress/zstd.rs``.
 
-Outputs (into ../src/, i.e. geosetta-crs-data/src/):
+Outputs (into ../src/, i.e. geoscribe/src/):
   * registry.bin.zst  — the GCR1 image (see ../registry-format.org), zstd-compressed
                         with the ``zstd`` CLI (plain single frame, no dictionary), so
                         geosetta's from-scratch decoder can read it.

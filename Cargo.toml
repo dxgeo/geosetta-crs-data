@@ -1,15 +1,19 @@
 [package]
-name = "geosetta-crs-data"
-version = "0.2.0"
+name = "geoscribe"
+version = "0.3.0"
 edition = "2024"
-description = "Embedded CRS registry data (PROJJSON + WKT definitions, derived from PROJ/proj.db) for Geosetta. The Rust glue is MIT; the embedded data carries third-party dataset terms — see NOTICE."
+description = "Embedded CRS registry: an authoritative (authority, code) -> PROJJSON/WKT lookup, derived from PROJ/proj.db. The Rust glue is MIT; the embedded data carries third-party dataset terms — see NOTICE."
 license = "MIT"
 
-# This crate holds ONLY data + thin accessors. Decoding (zstd) and lookup live in
-# `geosetta`, which uses its own from-scratch codecs — so this crate has no
-# dependencies and `geosetta`'s default build stays dependency-free.
+# Decoding (zstd) and lookup live here (R6, see public-api.org), behind a
+# real public API (`resolve`/`resolve_by_name`/`all`) — no external
+# dependencies, just this crate's own ported zstd decoder.
 [dependencies]
 
 [lib]
-name = "geosetta_crs_data"
+name = "geoscribe"
 path = "src/lib.rs"
+
+[[bin]]
+name = "geoscribe"
+path = "src/main.rs"

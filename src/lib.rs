@@ -1,45 +1,69 @@
-//! Embedded CRS registry data for Geosetta.
+//! Embedded CRS registry: an authoritative (authority, code) lookup.
 //!
 //! CRS definitions (PROJJSON + WKT1 + WKT2:2019) derived at build time from PROJ's
-//! `proj.db`,
-//! plus a name → (authority, code) index. This crate carries **only data and thin
-//! accessors** — decompression (zstd) and lookup live in `geosetta`, which uses
-//! its own from-scratch codecs. Keeping the data (and its third-party terms) in a
-//! separate crate lets the core `geosetta` crate stay pure-MIT and dependency-free.
+//! `proj.db`, plus a name → (authority, code) index. Decompression (zstd) and
+//! `GCR1` lookup live *here* (R6, see `public-api.org`), behind [`resolve`],
+//! [`resolve_by_name`], and [`all`] — nothing outside this crate needs to parse
+//! the wire format directly. `geosetta` was this crate's only consumer when it
+//! owned decoding itself; a second one ([nazca](https://github.com/dxgeo/nazca))
+//! is why that moved here instead.
 //!
 //! The embedded data is governed by the terms in `NOTICE` (PROJ, EPSG/IOGP, Esri,
 //! IGN France, IAU, NKG). It is a *derived* representation, not the official
 //! datasets.
 //!
-//! The blob's in-memory layout (`GCR1`) is specified in `registry-format.org`; the
-//! `geosetta` reader decodes it. This crate only exposes the raw bytes and a few
-//! stamped constants. Everything below is a re-export of generated data
+//! The blob's in-memory layout (`GCR1`) is specified in `registry-format.org`;
+//! `registry.rs` decodes it. Everything below is built on generated data
 //! (`generated.rs`, `names.rs`) produced by `tools/gen_crs_registry.py`; the
-//! accessors return empty data until the generator has run.
+//! accessors return empty/`None` results until the generator has run.
 
 #![forbid(unsafe_code)]
 
 mod generated;
 mod names;
+mod registry;
+mod zstd;
 
-/// The zstd-compressed `GCR1` registry blob (`(authority, code) → {PROJJSON,
-/// WKT1, WKT2}`). Decoded by the consumer (`geosetta`) with its own zstd decoder, which
-/// needs the decompressed length — see [`REGISTRY_BLOB_RAW_SIZE`].
-///
-/// Empty until the generator runs.
-pub const REGISTRY_BLOB_ZSTD: &[u8] = generated::REGISTRY_BLOB_ZSTD;
+pub(crate) use generated::{REGISTRY_BLOB_RAW_SIZE, REGISTRY_BLOB_ZSTD};
+pub(crate) use names::NAMES;
 
-/// Decompressed length of the `GCR1` image inside [`REGISTRY_BLOB_ZSTD`]. Required
-/// because `geosetta`'s zstd decoder is told the output size up front (it ignores
-/// the frame's own content-size field). `0` until generated.
-pub const REGISTRY_BLOB_RAW_SIZE: usize = generated::REGISTRY_BLOB_RAW_SIZE;
+/// A resolved CRS definition, in every authoritative form the registry
+/// stores for it. `wkt`/`wkt2` are `None` where PROJ can't express the CRS
+/// in that dialect (~4% of entries have no WKT1 — see the generator's
+/// `no_wkt`/`no_wkt2` counters).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CrsRecord {
+    pub authority: &'static str,
+    pub code: &'static str,
+    pub projjson: &'static str,
+    pub wkt: Option<&'static str>,
+    pub wkt2: Option<&'static str>,
+}
 
-/// Name → (authority, code) index: every authority's official CRS names plus Esri
-/// aliases, for id-less inputs (e.g. shapefile `.prj`). The code is a **string**
-/// (IGNF/OGC/PROJ/NKG use alphanumeric codes such as `CRS84`, `LAMB93`), so this
-/// is `(name, authority, code)`. Populated by the generator; consumed by name→code
-/// recovery (milestone R2).
-pub static NAMES: &[(&str, &str, &str)] = names::NAMES;
+/// Resolve by `(authority, code)` — e.g. `("EPSG", "4326")`. Binary searches
+/// the decoded index; decompresses the blob once on first call. `None` if
+/// the generator hasn't run or the pair isn't in the registry.
+pub fn resolve(authority: &str, code: &str) -> Option<CrsRecord> {
+    registry::resolve(authority, code)
+}
+
+/// Name -> `(authority, code)` candidates: every authority's official name
+/// plus Esri aliases (`NAMES`), for a given catalog name. Multiple
+/// authorities can share a name, so this returns every candidate rather than
+/// picking one — weaker evidence than an inline id, so callers that need the
+/// trust distinction `crs-registry.org`'s § Validation draws (inline id
+/// trusted outright; name/param match validated before snapping) implement
+/// that policy themselves on top of this. This crate does one honest lookup,
+/// not a validation policy.
+pub fn resolve_by_name(name: &str) -> impl Iterator<Item = (&'static str, &'static str)> {
+    registry::resolve_by_name(name)
+}
+
+/// Every record — bulk/oracle consumers (crosswalk generators, identify
+/// oracles). Materializes the whole decoded index; not for hot paths.
+pub fn all() -> impl Iterator<Item = CrsRecord> {
+    registry::all()
+}
 
 /// Dataset versions this build was generated from (stamped by the generator, read
 /// from `proj.db`'s `metadata` table). Empty until generated.
