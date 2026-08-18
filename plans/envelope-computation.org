@@ -1,0 +1,222 @@
+#+TITLE: Plan: Envelope (Bounding Box) Computation
+#+AUTHOR: Daniel Okuniewicz Jr.
+#+DATE: {{{time(%Y-%m-%d)}}}
+
+* Envelope (Bounding Box) Computation
+
+** STATUS -- SCOPING ONLY, NOT YET IMPLEMENTED
+
+** WHY
+
+*** The immediate finding: Geosetta drops a source GeoPackage's envelope
+GeoPackage's Binary geometry header (GPB, §2.1.3) carries an *optional*
+per-geometry envelope -- a cached bounding box in one of four dimension-
+specific forms (XY/XYZ/XYM/XYZM, 32/48/48/64 bytes), selected by a 3-bit
+indicator in the header's flags byte. Checked directly against
+=geosetta='s current code while working through its =plans/zm-geometry.org=
+migration (M5): the reader (=strip_gpkg_header=) only ever uses the flags
+byte to compute how many bytes to *skip* -- the envelope's actual min/max
+values are read as raw bytes and then discarded, never parsed into numbers,
+never stored anywhere. The writer (=gpkg_geometry=) hardcodes
+=flags = 0x01= -- no envelope -- unconditionally, regardless of the source.
+Net effect: a real, envelope-bearing source =.gpkg= (confirmed with a real
+=ogr2ogr -f GPKG= fixture, committed at
+=geosetta/tests/fixtures/gdal_linestring_z.gpkg= -- =ogr2ogr= writes an
+envelope for a non-degenerate =LINESTRING Z= but not for a degenerate
+=POINT=, verified by hand-decoding the raw bytes) has its envelope silently
+dropped on any GeoPackage round trip through Geosetta today.
+
+*** The broader charter this falls under
+User decision (2026-08-17): =geoscribe= becomes the crate that owns *all*
+metadata assignment that isn't a simple pass-through, so =geosetta= stays a
+hub-and-spoke *format* translator -- copying a source's own values through
+unchanged where it can (WKT/PROJJSON strings, authority codes, coordinates
+themselves) -- and defers to =geoscribe= for anything that has to be
+*computed or derived* rather than copied. CRS resolution already works this
+shape: =geoscribe= resolves =(authority, code) -> definition= from data
+=geosetta= doesn't carry itself. Envelope computation is the same *shape*
+of problem -- a value =geosetta= doesn't have and must derive, not one the
+source handed it -- even though, unlike CRS resolution, it needs *no*
+embedded dataset at all; it's pure arithmetic over the geometry's own
+coordinates. This is now =geoscribe='s stated identity, not just this
+plan's framing -- see =README.md=: *a geospatial metadata reader/writer*,
+no longer "embedded CRS registry" as the top-level description (resolved,
+§ OPEN QUESTIONS). What's still open: exactly how far that charter extends
+past these first two capabilities, and how a second, non-CRS capability
+gates into =geosetta='s Cargo features -- both tracked below, neither
+answered by the identity statement alone.
+
+** SCOPE
+Given a geometry's positions -- dimension-aware, mirroring =geosetta='s own
+=Position { x, y, z: Option<f64>, m: Option<f64> }= from its
+=plans/zm-geometry.org= M1 -- compute the envelope: min/max X and Y always;
+min/max Z if any position carries one; min/max M if any position carries
+one.
+
+Two layers, mirroring how CRS resolution already splits between this crate
+(data + lookup) and =geosetta= (format-specific wiring):
+- *=geoscribe=*: a dimension-generic bbox/envelope computation. Pure math,
+  no format opinions, no embedded data, no I/O.
+- *=geosetta='s own GeoPackage writer* (behind whichever feature gate is
+  chosen -- see OPEN QUESTIONS): calls =geoscribe='s computation, then
+  serializes the result into GPB's *specific* byte layout -- envelope
+  indicator code selection plus the little-endian double sequence in GPB's
+  own order (confirmed empirically from the real =gdal_linestring_z.gpkg=
+  fixture for the XYZ case: =minx, maxx, miny, maxy, minz, maxz= -- min/max
+  pairs per dimension, *not* interleaved min-then-next-dimension).
+
+*Out of scope for this plan*, so a later sweep isn't implied by this one:
+- GeoParquet's covering-bbox column -- already tracked as its own gap
+  (2D-only today; =geosetta/plans/arbitrary-geoparquet.org='s milestone 6 /
+  =zm-geometry.org='s M8), a different container format with its own
+  metadata shape, not GPB's.
+- FlatGeobuf's =NodeItem= bbox -- already computed by =geosetta='s own
+  =spatial.rs=, XY-only, feeding the packed Hilbert R-tree; nothing here
+  requires touching it. Whether it should *also* move to =geoscribe=
+  eventually is exactly the kind of question § OPEN QUESTIONS flags rather
+  than pre-answers.
+
+** DESIGN
+
+*** A new, independent coordinate type -- not a reuse of `geosetta::Position`
+=geoscribe= cannot depend on =geosetta= (the dependency runs the other
+direction: =geosetta= optionally depends on =geoscribe=, never the
+reverse), and this crate's own stated identity is "standalone, reusable"
+(=README.md=), not =geosetta=-specific. So this plan adds =geoscribe='s own
+=Coord { x: f64, y: f64, z: Option<f64>, m: Option<f64> }= -- structurally
+identical to =geosetta::Position= but an independent type. This mirrors an
+existing, explicit precedent in this crate: =src/zstd.rs= is already "a
+deliberate, documented duplication" of =geosetta='s own zstd decoder,
+kept separate because =geosetta= needs zstd for an unrelated purpose
+(GeoParquet page decompression) -- see =README.md='s § itself for that
+exact reasoning, reused here for the same structural reason.
+
+*** API sketch
+#+begin_src rust
+pub struct Coord {
+    pub x: f64,
+    pub y: f64,
+    pub z: Option<f64>,
+    pub m: Option<f64>,
+}
+
+/// Min/max per ordinate actually present across the input. `x`/`y` are
+/// `None` only for an empty input; `z`/`m` are `None` when *no* coordinate
+/// carried that ordinate (not when some do and some don't -- see the
+/// mixed-dimensionality note below).
+pub struct Envelope {
+    pub x: Option<(f64, f64)>,
+    pub y: Option<(f64, f64)>,
+    pub z: Option<(f64, f64)>,
+    pub m: Option<(f64, f64)>,
+}
+
+pub fn envelope(coords: impl IntoIterator<Item = Coord>) -> Envelope;
+#+end_src
+Mixed dimensionality within one input (some coordinates carry Z, some
+don't) is accepted without erroring -- the envelope simply folds in
+whichever ordinates each coordinate actually has, matching
+=geosetta='s own WKB codec's existing "fall back gracefully, never
+panic" posture for the same edge case (=geometry/wkb.rs=, M2).
+
+*** GPB-specific serialization stays in `geosetta`, not here
+The envelope indicator code (0-4) and the exact byte layout are GeoPackage
+spec details with no bearing on any other format -- that mapping belongs in
+=geosetta='s own =geopackage/writer.rs=, which already owns every other
+GPB-specific concern (the 8-byte header, the flags byte's other bits). This
+crate returns a dimension-*neutral* result; =geosetta= decides what a
+present =z=/=m= means for *its* target format's specific envelope
+encoding.
+
+** MILESTONES
+- *E1* -- =Coord=/=Envelope= types + the dimension-generic =envelope()=
+  computation, in a new =src/envelope.rs=, exported from =lib.rs= alongside
+  the existing =resolve=/=resolve_by_name=/=all= surface
+  (=public-api.org='s precedent: a small, clean, documented public API, not
+  an ad-hoc internal helper promoted later). Pure unit tests -- no fixture,
+  no external tool needed, since this is arithmetic over synthetic
+  coordinates, the same style as =geosetta='s own =Dim=-struct tests in
+  =wkb.rs=.
+- *E2* -- =geosetta='s GeoPackage writer wiring: call =geoscribe::envelope=
+  behind the chosen feature (§ OPEN QUESTIONS), map the result to GPB's
+  indicator code + byte layout, select indicator =0= (no envelope) when the
+  feature is off or the caller opts out (§ OPEN QUESTIONS on default-on vs.
+  opt-in).
+- *E3* -- Verification against the real fixture already in hand: round-trip
+  =geosetta/tests/fixtures/gdal_linestring_z.gpkg= (a real, envelope-bearing
+  =ogr2ogr= file) through =geosetta='s reader then rewritten via the new
+  writer path, and confirm the re-emitted envelope bytes match GDAL's own
+  numerically. *Before shipping XYM/XYZM support specifically*: verify their
+  byte order against a real tool the same way the XYZ case was confirmed
+  here -- don't assume symmetry with XYZ's =minx,maxx,miny,maxy,minz,maxz=
+  pattern is correct for the M/ZM cases without checking, matching this
+  whole project's established discipline of confirming wire-format details
+  against real output rather than inferring them.
+- *E4 (stretch, not required)* -- Revisit whether FlatGeobuf's existing
+  XY-only =NodeItem= bbox computation (=geosetta/src/spatial.rs=) should
+  also route through this crate for consistency, once a second real
+  consumer of =envelope()= exists to justify it (echoing =public-api.org='s
+  own R6 rationale: a second consumer is what turned =geoscribe='s CRS
+  decoder from "one owner's internal detail" into "a real public API"). Not
+  scoped further here.
+
+** TESTING
+- E1: pure logic tests, synthetic coordinates -- 2D-only, Z-only, M-only,
+  ZM, empty input, and the mixed-dimensionality fallback case.
+- E3: =geosetta/tests/fixtures/gdal_linestring_z.gpkg= is the real-world
+  oracle already committed and available -- no new fixture-sourcing effort
+  needed for the XYZ case. XYM/XYZM will need their own real fixture,
+  sourced the same way that one was (a non-degenerate M-bearing geometry
+  through a real tool, not a degenerate one -- see that fixture's own
+  commit note on why a =Point= didn't work but a =LineString= did).
+
+** OPEN QUESTIONS
+- *Feature-flag naming/granularity.* =geosetta='s existing feature is
+  literally named =crs-registry= -- semantically wrong for gating unrelated
+  envelope math. Options: (a) reuse =crs-registry= as-is, simplest but
+  misleading once it gates more than CRS work; (b) a second, independent
+  Cargo feature (e.g. =geoscribe= itself, orthogonal to =crs-registry=) so a
+  caller can opt into envelope computation without pulling in CRS
+  resolution or vice versa; (c) rename =crs-registry= to something broader,
+  accepting the compatibility churn on a published feature flag. Leaning
+  (b) as lowest-churn and most honest about what each feature actually
+  gates, but this is the user's call on =geosetta='s public Cargo surface,
+  not decided here.
+- *Default-on vs. opt-in envelope writing.* =geosetta='s own
+  =plans/zm-geometry.org= (M5) called emitting an envelope "a non-goal --
+  size/query optimization, not a correctness requirement." That framing
+  assumed the computation didn't exist yet; once it does (this plan), is it
+  still right to default to *not* writing one, gated behind an explicit
+  flag (mirroring =--rtree=/=--sort-hilbert='s existing opt-in precedent),
+  or should a =crs-registry=-equivalent feature just always write one when
+  available? Recommend opt-in, matching precedent, but flagging rather than
+  deciding.
+- *Charter/identity drift -- RESOLVED (user decision, 2026-08-17).*
+  =geoscribe= is no longer just the embedded CRS registry; its stated
+  identity is now *a geospatial metadata reader/writer*, of which the CRS
+  registry and envelope computation are two instances. =README.md= and
+  =Cargo.toml='s =description= have been updated accordingly (no crate
+  rename -- =geoscribe= ("scribe" = one who records) already fits the
+  broader charter at least as well as it fit "CRS registry only," probably
+  better, which is presumably no accident given it was the name landed on
+  after three earlier passes). What's *not* resolved by this: the
+  feature-flag question above (still open) and the "where does this stop"
+  question below (still open) -- broadening the stated charter doesn't by
+  itself answer either.
+- *Where does "not a simple pass-through" stop?* Envelope computation is a
+  clean, narrow instance. Ring/polygon area, centroids, coordinate-
+  precision reduction, and other derived geometric properties are the same
+  *shape* of problem. Deciding how far this charter extends before it
+  becomes a vague catch-all is explicitly not resolved by this plan --
+  flagged for whoever next expands =geoscribe='s scope, so each addition
+  gets the same "is this really not a simple pass-through, and does it
+  really belong in the data crate rather than geosetta itself" scrutiny
+  this plan tried to give envelope computation, not a rubber stamp from
+  precedent.
+
+** DEPENDS ON / RELATED
+- =geosetta/plans/zm-geometry.org='s M5 (GeoPackage) -- this plan exists
+  because of the "does Geosetta keep a source's envelope" finding there.
+- This crate's own =public-api.org= -- the precedent for a clean, minimal,
+  documented public surface (=resolve=/=resolve_by_name=/=all=) this plan's
+  E1 should match for whatever it adds (=envelope=/=Coord=/=Envelope=).

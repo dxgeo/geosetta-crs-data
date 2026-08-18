@@ -1,0 +1,52 @@
+#+TITLE: Geoscribe Plans
+#+AUTHOR: Daniel Okuniewicz Jr.
+
+* Plans
+Design notes, one self-contained plan per file, ordered by dependency. Most are
+implemented — each entry says so; the one marked /scoping only/ is not.
+
+Orientation for a session picking up the CRS work starts one level up, at
+[[file:../handoff.org][handoff.org]], not here.
+
+- [[file:crs-registry.org][crs-registry.org]] :: *THE design plan.* Resolve a
+  CRS by =(authority, code)= and emit the authoritative definition, instead of
+  translating CRS strings structurally. Identity recovery (inline id → name →
+  parameter match), validation, the embedded blob generated from PROJ's
+  =proj.db=, the feature-gated two-build-mode contract, and the attribution
+  gate. *DONE* — milestones R1–R5 all implemented; R1's oracle (every embedded
+  definition round-trips at =projinfo --identify=) passes at 100%
+  (13,790/13,790). Its § RISKS / REMAINING OPEN QUESTIONS is still live.
+- [[file:registry-format.org][registry-format.org]] :: *THE container-format
+  spec* — the =GCR1= byte layout inside =registry.bin.zst=: fixed header,
+  authority table, sorted fixed-width index, string codes, and the
+  self-describing versioning that lets a reader reject a blob it can't decode.
+  *Depends on crs-registry.org* (it specifies that plan's R1/R5 artifact).
+  *DONE at v2* — v1 was implemented then superseded by v2 before release;
+  nothing built on v1 shipped. Also carries the user-built-blob licensing
+  analysis.
+- [[file:public-api.org][public-api.org]] :: Move decompression and lookup *into
+  this crate* — =resolve=/=resolve_by_name=/=all= as a real public API — rather
+  than shipping a blob that every consumer must decode itself. Revises
+  =crs-registry.org='s § MODULE LAYOUT; the reason this crate carries its own
+  zstd decoder. *Depends on both plans above.* *DONE* (R6a–R6d) — =geosetta='s
+  copy of the decode/lookup logic was deleted in favor of calling through.
+  *R6e is still open*: the acceptance test — a consumer with no =geosetta=
+  dependency resolving a real code — has not been run.
+- [[file:wkt-identify.org][wkt-identify.org]] :: Identify an *id-less* WKT
+  (Esri-flavor Shapefile =.prj=, which carries no =AUTHORITY= node) by looking
+  up its outer name and validating the candidate against the WKT's own
+  ellipsoid before snapping — =identify_from_wkt= as a library call plus a
+  pipeable =--identify= CLI mode. Restores the capability lost when =geosetta=
+  removed its =crs-registry= feature and this dependency in 0.24.0; geosetta
+  needs no changes, since its =--crs= flag already accepts arbitrary
+  WKT/PROJJSON text from a pipe. *Depends on public-api.org* — and *argues with
+  its § BOUNDARY*, which deliberately ruled this trust policy out of this crate.
+  /Scoping only, and blocked on settling that first./
+- [[file:envelope-computation.org][envelope-computation.org]] :: Dimension-aware
+  geometry envelope (bounding-box) computation — the second capability under
+  this crate's broadened charter, and the first that embeds no dataset at all.
+  Independent of the three CRS plans above; prompted by =geosetta= silently
+  dropping a source GeoPackage's cached envelope. *SCOPING ONLY, NOT YET
+  IMPLEMENTED.* Its § OPEN QUESTIONS holds the two live charter questions (how
+  far "not a simple pass-through" extends, and how a non-CRS capability gates
+  into =geosetta='s Cargo features).

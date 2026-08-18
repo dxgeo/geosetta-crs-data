@@ -139,6 +139,24 @@ trusted id; keeping that distinction at the call site, not baked into this
 crate, is what keeps =geoscribe= reusable by a consumer with
 different trust needs.
 
+*** SUPERSEDED IN PART (2026-08-17)
+The first sentence no longer holds: =identify_from_wkt= grew exactly this
+policy here, deliberately, over this section's objection. The reasoning is
+argued out in
+[[file:wkt-identify.org::*BOUNDARY -- RESOLVED IN FAVOR (2026-08-17)][wkt-identify.org
+§ BOUNDARY]] and turns on two things this section could not have known: the
+entry point takes the *whole WKT* rather than a bare name, so the input
+context declared missing above is present after all; and =geosetta= 0.24.0
+removed its dependency on this crate, so the "whichever format reader is
+doing the recovering" this section assigns the policy to no longer exists.
+
+What this section actually protects is *intact and enforced*: =resolve= and
+=resolve_by_name= are unchanged, =resolve_by_name= is still public and still
+returns candidates with no validation whatsoever, and the CLI still refuses to
+expose it. A consumer with different trust needs keeps the same building
+block it had. The policy was *added alongside*, in its own module, not baked
+into the lookup.
+
 ** MILESTONES
 - *R6a.* [DONE] Port the zstd decoder from =geosetta/src/compress/zstd.rs=
   into =geoscribe/src/zstd.rs=. No behavior change -- same algorithm, new
@@ -169,7 +187,11 @@ different trust needs.
 ** RISKS / OPEN QUESTIONS
 - *Versioning.* Public API surface added means a real semver bump
   (=0.2.0= -> =0.3.0=, not a patch), and =geosetta='s own =Cargo.toml=
-  version pin on =geoscribe= needs to move with it.
+  version pin on =geoscribe= needs to move with it. /Both halves are now
+  moot in different ways:/ =0.3.0= was never published, and =0.4.0=
+  supersedes it ([[file:wkt-identify.org][wkt-identify.org]] added more public
+  surface); and =geosetta= 0.24.0 removed the dependency entirely, so there is
+  no pin left to move.
 - *Duplicate zstd decoder as a maintenance fact, not a bug.* Flagging this so
   it isn't "cleaned up" later by someone merging the two copies back
   together without noticing why they're separate -- see § MODULE LAYOUT.
@@ -183,7 +205,11 @@ different trust needs.
 - =nazca='s =proj-db= live-database backend -- a different registry (a real
   on-disk =proj.db=, not this crate's embedded snapshot), unrelated to this API.
 - Any change to the =GCR1= format itself (still version =2=).
-- Baking identity-recovery/validation policy into this crate -- see § BOUNDARY.
+- Baking identity-recovery/validation policy into =resolve=/=resolve_by_name=
+  -- see § BOUNDARY. /Note:/ the policy did land in this crate later, as a
+  separate =identify_from_wkt= entry point that leaves both lookups untouched
+  ([[file:wkt-identify.org][wkt-identify.org]]); see § BOUNDARY's SUPERSEDED IN
+  PART note for what changed and what did not.
 
 ** RELATIONSHIP TO =crs-registry.org=
 Revises § MODULE LAYOUT and § FEATURE-GATED BEHAVIOR's implementation

@@ -1,0 +1,355 @@
+#+TITLE: Plan: Identify an Id-less WKT (name + ellipsoid recovery)
+#+AUTHOR: Daniel Okuniewicz Jr.
+#+DATE: {{{time(%Y-%m-%d)}}}
+
+* Identify an Id-less WKT
+
+** STATUS -- IMPLEMENTED
+=geoscribe::identify_from_wkt= (=src/identify.rs=) plus the pipeable
+=--identify= CLI mode, with =src/wkt.rs= and =src/json.rs= supporting them.
+Tests: unit cases in =src/identify.rs=, the Esri corpus in
+=tests/identify_esri.rs=, the CLI contracts in =tests/cli_identify.rs=.
+
+Two decisions were settled to get here, both recorded below:
+
+1. *§ BOUNDARY: decided in favor of building it.* See § BOUNDARY -- RESOLVED.
+2. *Ambiguity is reported, not resolved.* This *reverses* what § DESIGN
+   originally proposed (first validating candidate wins, =--all= as an extra).
+   See § AMBIGUITY, and § RESULTS for how often it matters -- far more often
+   than this plan assumed when it called first-wins "what the bulk oracles
+   measured at zero wrong matches".
+
+** WHY
+=geosetta= removed its =crs-registry= feature and its dependency on this crate
+in 0.24.0, replacing compiled-in resolution with run-time composition: it
+reports an unresolved CRS's code (=--print-crs-code=) and accepts a definition
+someone else resolved (=--crs <path|->=). See
+=geosetta/plans/crs-external-resolution.org=.
+
+That composition covers the *bare authority code* case completely -- this
+crate's CLI already resolves =EPSG:7844= to a definition on stdout, so
+=geoscribe "$(geosetta in.fgb --print-crs-code)" --projjson | ...= just works.
+
+It does *not* cover an *id-less* definition -- Esri-flavor Shapefile =.prj=
+text, which carries no =AUTHORITY= node anywhere. There is no code for
+=--print-crs-code= to report, so the pipeline has nothing to start from, and
+this crate's CLI cannot help because it only accepts an =(authority, code)=
+pair. That case was the original driver for the whole registry effort
+(=crs-registry.org= § WHY measured structural translation mis-identifying it:
+WGS 84 at ~70% confidence, NAD83/NAD27 outright *wrong*), and it is the one
+capability that did not survive the removal.
+
+*** What was lost, precisely
+The recovery lived in =geosetta/src/crs/registry.rs= (deleted; recoverable from
+that repo's git history) as =resolve_geographic_by_name= /
+=resolve_projected_by_name=. Three steps, only one of which was ever this
+crate's:
+
+1. *Extract* from the WKT -- the outer CRS name (first quoted string after the
+   root keyword, e.g. =GCS_WGS_1984=) and the ellipsoid's
+   =(semi_major_axis, inverse_flattening)= from the first =SPHEROID=/=ELLIPSOID=
+   node, whose leading =name, a, rf= triple WKT1 and WKT2 spell identically.
+2. *Look up* =geoscribe::resolve_by_name(&name)= -- candidates in =NAMES= order
+   (sorted by =(name, authority, code)=, so EPSG generally wins ties). No
+   normalization needed: the WKT's spelling is the same string =proj.db='s
+   =alias_name= (Esri) / =name= (everyone else) columns carry, which is what
+   =NAMES= was generated from.
+3. *Validate before snapping* -- fetch each candidate's PROJJSON, require
+   =type= to match (=GeographicCRS= / =ProjectedCRS=), pull its ellipsoid
+   (handling =semi_minor_axis= → =inverse_flattening= conversion), and require
+   both constants within a *relative 1e-6* (=SNAP_TOLERANCE=). First candidate
+   that validates wins; none validating yields =None=, never a guess. This is
+   what rejects a "lying name" -- correct spelling, fabricated ellipsoid.
+
+Steps 1 and 3 are what =public-api.org= § BOUNDARY calls the caller-side trust
+policy. Step 2 is this crate.
+
+*** How narrow it actually was
+Worth recording, because =registry.rs='s module doc oversells it and this plan
+should not restore a myth:
+
+- Only =NamedCrs::registry_projjson= ever called it, and only when the source
+  declared *neither* an authority nor a code (a declared-but-unknown code
+  deliberately did *not* fall through to name recovery -- guessing a different
+  code than the source stated is a mislabel, not a recovery).
+- So: *geographic CRSes only, id-less sources only, GeoParquet output only*.
+  The =.prj= writer's path (=registry_wkt=) was trusted-id only.
+- =resolve_projected_by_name= was written, documented, and bulk-oracle-tested
+  over *2,274* real Esri projected fixtures -- and had *zero* call sites,
+  living under the file's =#![allow(dead_code)]=. It never ran in production.
+
+A reimplementation here should cover both geographic and projected from the
+start. The projected resolver is already written and validated; only its
+consumer was missing.
+
+** BOUNDARY -- RESOLVED IN FAVOR (2026-08-17)
+The argument below stands as written and was accepted: the reversal is
+justified because =identify_from_wkt= takes *the whole WKT*, which restores
+exactly the input context § BOUNDARY said was missing, and because no format
+reader remains in a position to own the policy.
+
+What settled the surviving counter-argument (the CLI's "safe to pipe without
+eyeballing" promise) was making the mitigation stronger than § DESIGN first
+proposed: the weaker mode does not merely *document* that it is weaker, it
+*refuses to answer* when the evidence supports more than one CRS. A
+=--identify= that printed a definition would have made the promise
+conditional; one that prints nothing and exits nonzero keeps it absolute --
+anything on stdout is still a single, validated answer.
+
+=public-api.org= § BOUNDARY should be read together with this section; the
+requirement it actually protects (=resolve_by_name= stays a raw,
+policy-free lookup, and stays public) is intact and enforced by
+=resolve_by_name='s own doc comment and the CLI's refusal to expose it.
+
+** BOUNDARY -- THE ARGUMENT AGAINST THIS PLAN
+[[file:public-api.org][public-api.org]] § BOUNDARY says, deliberately and in
+advance, that this must not happen:
+
+#+begin_quote
+this crate should stay a *dumb, honest lookup*, not grow the trust/validation
+policy that sits on top of it today [...] That policy is about *how much to
+trust a recovered candidate before accepting it*, which is meaningless without
+knowing what kind of input produced the candidate -- a concern that belongs to
+whichever format reader is doing the recovering (=geosetta= today, maybe others
+later), not to the registry itself.
+#+end_quote
+
+That reasoning was sound and should not be waved away. Two things about it have
+changed, and the plan stands or falls on whether they are enough:
+
+1. *The input kind is no longer unknown.* The objection is precise: a policy on
+   top of =resolve_by_name(name)= is unjustifiable because a bare *name*,
+   stripped of context, tells you nothing about what produced it. But the
+   proposed entry point does not take a name -- it takes *the whole WKT*, which
+   is self-describing and carries its own validator. =identify_from_wkt(wkt)=
+   knows exactly what kind of input produced the candidate: a WKT definition,
+   whose own ellipsoid constants are the evidence the policy weighs. The
+   context § BOUNDARY says is missing is precisely what the argument restores.
+   Note the shape this preserves: =resolve_by_name= stays exactly as it is,
+   candidates-not-answers, for consumers with different trust needs.
+2. *There is no longer a format reader in a position to own it.* § BOUNDARY
+   assigns the policy to "whichever format reader is doing the recovering
+   (=geosetta= today)". As of geosetta 0.24.0 there is no such reader: geosetta
+   has no dependency on this crate and is not getting one back. Left where
+   § BOUNDARY puts it, the policy belongs to nobody and the capability simply
+   does not exist for anyone using either tool's CLI.
+
+*Counter-argument that survives both.* A validated answer is a stronger claim
+than a lookup, and this crate's CLI currently promises its output is "always
+safe to pipe without a human eyeballing it first" *because* it is trusted-id
+only. Growing =--identify= makes that promise conditional on which mode you
+invoked, and a user who does not read the distinction will pipe weaker evidence
+believing it is authoritative. Mitigations in § DESIGN (default unchanged,
+=--identify= documented as the weaker mode, =--all= for human adjudication) are
+what the decision should be judged on.
+
+** DESIGN
+*** Library first
+As built (the proposal was =-> Option<&'static CrsRecord>=; see § AMBIGUITY for
+why the third outcome is named rather than collapsed into =None=):
+
+#+begin_src rust
+/// A *validated answer*, not a lookup: the WKT's outer name is looked up and
+/// each candidate confirmed against the WKT's own ellipsoid before snapping.
+pub fn identify_from_wkt(wkt: &str) -> Identity;
+
+pub enum Identity {
+    /// Exactly one candidate validated -- a real answer, safe to use.
+    Unique(CrsRecord),
+    /// More than one validated. Every one fits the evidence the WKT carries;
+    /// choosing needs information the WKT does not have, so this does not choose.
+    Ambiguous(Vec<CrsRecord>),
+    /// No extractable name/ellipsoid, no candidate, or none validated.
+    Unidentified,
+}
+
+impl Identity {
+    /// `None` for *both* Ambiguous and Unidentified -- the accessor a caller
+    /// that must not guess reaches for.
+    pub fn unique(self) -> Option<CrsRecord>;
+    /// Every validating candidate, for a caller doing its own adjudication.
+    pub fn into_candidates(self) -> Vec<CrsRecord>;
+}
+#+end_src
+
+Mirrors the existing =resolve= + CLI-front-end shape. =resolve_by_name= remains
+public and unchanged as the candidates-level escape hatch, so a consumer with
+different trust needs keeps today's building block -- § BOUNDARY's actual
+requirement.
+
+*** CLI: an input mode, orthogonal to the dialect flags
+#+begin_src sh
+geoscribe --identify [--wkt | --wkt2 | --projjson] < parcels.prj
+#+end_src
+
+=--identify= says where the *input* comes from (WKT on stdin) rather than what
+the output looks like, so it composes with the three existing dialect flags
+untouched. The whole point, on the geosetta side:
+
+#+begin_src sh
+geoscribe --identify --projjson < parcels.prj \
+  | geosetta parcels.shp parcels.parquet --crs -
+#+end_src
+
+*Geosetta needs zero changes for this.* =--crs= already accepts arbitrary
+WKT/PROJJSON text from a file or stdin; it neither knows nor cares what
+produced it. That is the payoff of its text-in design and the reason this work
+belongs entirely on this side of the boundary.
+
+*** Contracts
+- *Exit status must match geosetta's expectation*: nothing on stdout plus a
+  nonzero exit when no candidate validates, so a pipeline fails loudly instead
+  of feeding empty text onward. Geosetta hard-errors on an empty =--crs=
+  (=an_empty_override_is_rejected_rather_than_treated_as_no_override= in its
+  =tests/crs_external.rs=), so the two contracts compose correctly -- an empty
+  identification cannot silently become "no override". *Verified end to end*
+  against the real binaries, not just asserted here.
+- *Ambiguity*: see § AMBIGUITY -- this is where the built thing departs from
+  what was first proposed. Exit =2= specifically (distinct from =1=) so a
+  script can tell "several fit, pick one" from "nothing fits".
+- *Projected CRSes validate the base geographic ellipsoid only*, deliberately
+  not projection method/parameters: building a GDAL↔Esri method/parameter
+  crosswalk is what sank the earlier structural-*translation* attempt
+  (=handoff.org= § KEY FINDINGS, "TRIED AND REVERTED"). The bulk oracle is the
+  empirical check on whether the ellipsoid bar holds; if it ever finds a
+  *wrong* (not merely declined) resolution, add a real parameter check then,
+  not before.
+
+*** The WKT tokenizer this crate does not have
+This crate stores WKT strings but has never parsed one. =identify_from_wkt=
+needs a shallow tokenizer (brackets, commas, quoted strings, bare words) plus
+the two extractors -- roughly 100 lines, portable near-verbatim from
+=geosetta/src/crs.rs='s =tokenize_wkt= / =wkt_crs_name_toks= /
+=wkt_ellipsoid_params_toks=.
+
+*Port, do not share.* Geosetta keeps its own copy regardless (=wkt_authority_code=
+and =is_crs_wkt= both need it), and factoring the tokenizer into a shared crate
+would reintroduce exactly the dependency geosetta just removed. Two copies of a
+*shallow, spec-stable* WKT lexer is the same maintenance fact already accepted
+for the zstd decoder (=public-api.org= § MODULE LAYOUT / § RISKS), for the same
+reason.
+
+** AMBIGUITY -- WHY NOTHING IS PICKED
+This plan originally proposed defaulting to the first validating candidate in
+=NAMES= order, on the grounds that it was "what geosetta did and what the bulk
+oracles measured at zero wrong matches". Both halves are true and the
+conclusion is still wrong.
+
+"Zero wrong" is the wrong bar for this question. The oracle asks whether a
+returned CRS *is what it says it is* -- and in the ambiguous cases every
+candidate passes that test, because each one is a real registry entry that
+self-identifies at 100%. What the oracle cannot see is that the *runners-up
+were equally right*. First-in-=NAMES=-order is a sort, not evidence; it
+resolved the tie by tie-breaking, and the oracle had no way to complain.
+
+Concretely: an Esri =.prj= naming =NAD_1983_2011_UTM_Zone_10N= matches both
+EPSG:6339 and the deprecated ESRI:102057, whose PROJJSON is byte-identical
+except for the =id= node. Geosetta returned EPSG:6339. That is a defensible
+*preference*, but this crate has no basis for it -- checked directly: *no
+entry's PROJJSON carries a =deprecated= field*, so there is nothing in the
+embedded data that could prefer the live twin honestly. Emitting one label
+over the other would be inventing the distinction.
+
+So [[*DESIGN][=identify_from_wkt=]] returns =Identity::Ambiguous(Vec<CrsRecord>)=
+-- every candidate, in =NAMES= order -- and =Identity::unique()= yields =None=
+for it, so a caller cannot take an arbitrary answer by accident. The CLI
+prints nothing, lists the candidates on stderr, and exits =2=; =--all= prints
+them as =AUTHORITY:CODE= lines for adjudication.
+
+*This is the one behavior change from geosetta*, and it is not marginal: see
+§ RESULTS.
+
+** RESULTS
+*** How often ambiguity actually fires
+Over the two real Esri corpora, per =the_ambiguity_rate_over_the_corpus=:
+
+| corpus     | fixtures | unique |    ambiguous | unidentified |
+|------------+----------+--------+--------------+--------------|
+| geographic |      431 |    218 |          109 |          104 |
+| projected  |    2 274 |  1 306 |          890 |           78 |
+
+Geosetta answered on unique *and* ambiguous alike -- 327 of 431 and 2 196 of
+2 274. So *one in three* of its projected answers, and one in three of its
+geographic ones, was a sort order standing in for evidence. That is the number
+that justifies the reversal; had it been a handful of exotic entries, first-wins
+would have been fine.
+
+The dominant pattern is a deprecated ESRI code beside its live EPSG or ESRI
+twin. A =deprecated= flag in =GCR1= would collapse most of these to =Unique=
+-- the most valuable follow-up this plan produced, and now the standing
+§ OPEN QUESTIONS item.
+
+*** The bulk oracles
+Both pass at the hard bar, with =projinfo= 9.8.1:
+
+- geographic: 450 candidates at =100 %=, 104 fixtures declined, *0 wrong*
+- projected: 3 072 candidates at =100 %=, 78 declined, 19 known =--identify=
+  gaps, *0 wrong*
+
+Stricter than geosetta's version of the same oracle in a way that matters:
+geosetta checked only the candidate it picked, so the runners-up it discarded
+were never validated at all. Here *every* member of an ambiguous set is
+checked, because every member is something a human may choose.
+
+** TESTING
+All of the below is built; § RESULTS has the numbers.
+
+- The real Esri fixtures were copied here from =geosetta/tests/fixtures/=:
+  =esri_geographic_wkt1.tsv= (431 rows) and =esri_projected_wkt1.tsv= (2,274
+  rows), both generated by =tools/gen_esri_*_fixtures.py= in this repo.
+  Geosetta's copies are now unused by anything in that crate and can be
+  deleted whenever its tree is next tidied.
+- Both bulk oracles came with them and keep their bar: *zero wrong matches*,
+  declining to resolve being acceptable. That is a different bar from
+  =crs-registry.org='s R1 oracle (100% identification) and deliberately so --
+  name evidence is weaker than an id. They stay =#[ignore]=-gated on =projinfo=
+  being on =PATH=.
+- Unit cases carried over verbatim from the deleted =registry.rs=: Esri WGS 84
+  → 4326, NAD83 → 4269, NAD27 → 4267 (the last exercising =semi_minor_axis= →
+  =inverse_flattening= conversion), and the "lying name" rejection (WGS 84's
+  name with a fabricated ellipsoid must *not* snap). All three still give the
+  same answers.
+- *The equivalence test.* =matches_the_geosetta_rule_over_the_whole_corpus=
+  reimplements geosetta 0.23's rule independently (its own text scrapes,
+  sharing none of =identify.rs='s extraction or comparison code) and checks,
+  over all 2,705 fixtures, that geosetta's answer is always the *first* member
+  of this crate's candidate set, and that the two agree exactly on when to
+  decline. Nothing geosetta could resolve was lost; what changed is that the
+  tie-break is now visible.
+- Corpus properties: no candidate set contains the same =(authority, code)=
+  twice, =Ambiguous= always carries ≥2, and every offered candidate round-trips
+  through =resolve=, since a human is expected to paste it back in.
+- CLI (=tests/cli_identify.rs=): the definition alone on stdout; empty stdout
+  plus exit =2= when ambiguous and exit =1= when unidentifiable; =--all=
+  listing; each dialect flag composing with =--identify=; file vs. stdin vs.
+  =-=; missing file, empty input, and non-WKT text all refused rather than
+  silently empty; and the listed candidate feeding straight back into the
+  trusted-id form.
+
+** OPEN QUESTIONS
+*** Open
+- *Should =GCR1= carry a =deprecated= flag?* By far the highest-value follow-up:
+  it would collapse most of the 999 ambiguous fixtures in § RESULTS to a single
+  live answer, on real evidence rather than a tie-break. =proj.db= has the
+  column; the blob does not, and adding it is a format change (v3) plus a
+  regeneration. Note the policy question underneath it -- preferring a live CRS
+  over a deprecated one is a judgment, and § BOUNDARY's ghost applies: it
+  belongs in =identify.rs= (which already weighs evidence), not in =resolve=.
+- *Should a =--identify= match report its evidence* (matched name, ellipsoid
+  deltas) on stderr, so a human can sanity-check what was snapped to without
+  =--all=? Deferred, not rejected -- worth revisiting if anyone reports being
+  surprised by a =Unique= answer.
+- *Does the ellipsoid-only bar hold as =proj.db= grows?* Unchanged from
+  § DESIGN: if a bulk oracle ever finds a *wrong* (not merely declined)
+  resolution, add a real projection method/parameter check then, not before.
+
+*** Settled
+- *§ BOUNDARY: is the WKT-scoped framing enough to justify the reversal?* Yes
+  -- see § BOUNDARY -- RESOLVED.
+- *Does =--identify= belong on the CLI at all, or library-only?* On the CLI.
+  Library-only would have left geosetta's CLI users -- the people who actually
+  hit this -- with nothing. The "safe to pipe without eyeballing" promise is
+  kept by refusing to print an ambiguous answer at all, rather than by
+  withholding the mode.
+- *Name the flag.* =--identify=, matching =projinfo --identify=: same concept,
+  already familiar to anyone who has debugged a =.prj=.

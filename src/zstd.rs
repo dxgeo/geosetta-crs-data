@@ -3,7 +3,7 @@
 //! the embedded `GCR1` registry blob.
 //!
 //! Ported from `geosetta`'s `src/compress/zstd.rs` — same algorithm, new
-//! home; see `public-api.org` § MODULE LAYOUT for why this crate carries its
+//! home; see `plans/public-api.org` § MODULE LAYOUT for why this crate carries its
 //! own copy instead of depending on `geosetta`'s (whose copy keeps serving
 //! GeoParquet's ZSTD-compressed pages, an unrelated use). Only real
 //! difference from the source: no shared crate-wide error type to reuse here,

@@ -5,7 +5,34 @@
 * Handoff — CRS work in Geosetta
 
 Orientation doc for an agent picking up the coordinate-reference-system (CRS)
-work. Read this, then =crs-registry.org= (the design plan) in this same directory.
+work. Read this, then =plans/crs-registry.org= (the design plan) — it and the
+rest of this crate's design docs live in =plans/=.
+
+** READ THIS FIRST — WHAT HAS CHANGED SINCE
+Everything below is an accurate record of how the registry was *built*, and
+its § KEY FINDINGS is still the best account of what was tried and rejected.
+Two things it describes are no longer the present tense:
+
+1. *The =crs-registry= Cargo feature is gone.* =geosetta= 0.24.0 removed the
+   feature and its dependency on this crate outright. The two compose over a
+   *pipe* now (=geosetta --print-crs-code= / =geosetta --crs <path|->=), not a
+   linked optional dependency — see
+   =geosetta/plans/crs-external-resolution.org=. Anywhere below that says
+   "behind a =crs-registry= feature" or "the feature-off build", read it as
+   history.
+2. *Name recovery lives here now, not in =geosetta=.* R2's
+   =resolve_geographic_by_name= / =resolve_projected_by_name= (described below
+   as =geosetta/src/crs/registry.rs=) were deleted with that crate's registry
+   module and reimplemented here as =identify_from_wkt=
+   ([[file:plans/wkt-identify.org][plans/wkt-identify.org]]), which also
+   reverses =plans/public-api.org= § BOUNDARY — deliberately, argued in
+   § BOUNDARY -- RESOLVED. One behavior change worth knowing before reading
+   the R2 oracle numbers below: where several CRSes fit a WKT equally well it
+   now reports *all* of them instead of taking the first in =NAMES= order, so
+   the "327/431 resolved" figure below is now 218 unique + 109 ambiguous.
+
+For current state rather than history, start at
+[[file:project.org][project.org]] and [[file:plans/todo.org][plans/todo.org]].
 
 ** TL;DR
 Geosetta carries a CRS through its IR opaquely and *labels but never reprojects*.
@@ -16,7 +43,7 @@ PROJ's whole =proj.db= and resolve *(authority, code) → authoritative definiti
 That data carries third-party terms, so it lives in a *separate crate*
 (=geoscribe=, this directory) behind a =crs-registry= Cargo feature; the
 core =geosetta= crate stays pure-MIT and dependency-free. The plan is
-=crs-registry.org= (milestones R1–R5); the container format is =registry-format.org=
+=plans/crs-registry.org= (milestones R1–R5); the container format is =plans/registry-format.org=
 (=GCR1=). *R1 is DONE, all four steps:* the generator + embedded blob (all
 13 790 CRSes, =registry.bin.zst= = 637 KB); the reader (=src/crs/registry.rs=,
 =OnceLock=-decoded, =def_projjson=/=def_wkt= via binary search); GeoParquet
@@ -44,13 +71,16 @@ oracle over every native ESRI geographic CRS in =proj.db= resolves *327/431
 already suffices, proven by a 2 274-fixture bulk oracle (every native ESRI
 projected CRS in =proj.db=) at *2185/2274 (96%) resolved@100%, zero wrong*
 (11 hit an already-documented R1 =projinfo --identify= gap, not a defect).
-See KEY FINDINGS and =crs-registry.org='s R2 section for the full writeup,
+See KEY FINDINGS and =plans/crs-registry.org='s R2 section for the full writeup,
 including why axis order (what sank structural *translation* for projected
-Esri) was never a risk for name *recovery*. *R3 has a real design tension* (not
-yet resolved — see KEY FINDINGS): its "delete what the registry makes
-redundant" framing would regress the *default* (=crs-registry=-off) build if
-taken literally, since the crosswalk it wants to trim is shared,
-unconditionally-compiled code, not feature-gated. *R4 is DONE* (implemented and
+Esri) was never a risk for name *recovery*. *R3 is now DONE* (closed
+2026-08-16, no code changes — see KEY FINDINGS): its "delete what the
+registry makes redundant" framing would have regressed the *default*
+(=crs-registry=-off) build if taken literally, since the crosswalk it wants
+to trim is shared, unconditionally-compiled code, not feature-gated; closed
+instead via option (a) — R1/R2's registry-first try-order already achieves
+"structural path becomes validator/fallback" in behavior, so no crosswalk
+deletion was made. *R4 is DONE* (implemented and
 shipped 2026-08-12, in geosetta 0.21.0) — =geosetta/plans/shapefile.org= (full
 Shapefile:
 =.shp=/=.shx= geometry incl. ring-classification for Polygon/MultiPolygon,
@@ -58,7 +88,7 @@ Shapefile:
 both directions, including GeoPackage↔Shapefile fan-out; =.prj= writing is the
 first consumer of R1's =registry::def_wkt=. See § SHAPEFILE (R4) MILESTONE
 DETAIL below. *R5 is DONE* (2026-08-12): WKT2:2019 added to the registry blob
-(=GCR1= bumped =v1= → =v2=, =registry-format.org= § V1→V2) and a new
+(=GCR1= bumped =v1= → =v2=, =plans/registry-format.org= § V1→V2) and a new
 =registry::def_wkt2=, closing the ~4% gap WKT1 can't express (datum
 ensembles, dynamic CRSes, some compound) — proven, not assumed, by a new bulk
 oracle: every one of the 13 790 entries now has WKT2, 13 735 self-identify at
@@ -113,7 +143,7 @@ CRSes' WKT2 — see KEY FINDINGS.
   =gen_esri_projected_fixtures.py=.
 - =plans/crs.org= :: milestones A/B/C (done) + D/reverse (now superseded by the
   registry). =plans/shapefile.org= :: the full Shapefile format-spoke plan
-  (geometry, =.dbf= attributes, =.prj= CRS); this *is* =crs-registry.org='s R4,
+  (geometry, =.dbf= attributes, =.prj= CRS); this *is* =plans/crs-registry.org='s R4,
   written up in the main crate's plans dir since most of it (geometry/DBF) has
   no CRS dependency. *DONE* (2026-08-12). =plans/README.org= indexes both.
 - =src/shapefile/{mod,geometry,dbf,reader,writer}.rs= :: NEW, IMPLEMENTED
@@ -128,10 +158,10 @@ CRSes' WKT2 — see KEY FINDINGS.
   =convert::read_features=/=write_features= the same way GeoPackage does — see §
   SHAPEFILE (R4) MILESTONE DETAIL.
 
-*** Key files — geoscribe (this dir)
-- =crs-registry.org= :: *THE design plan.* Read it in full. Milestones R1–R5,
+*** Key files — geoscribe (this crate)
+- =plans/crs-registry.org= :: *THE design plan.* Read it in full. Milestones R1–R5,
   identity recovery + validation, sizes, degraded-mode contract, attribution.
-- =registry-format.org= :: *THE container-format spec* (=GCR1=, now =v2= — see
+- =plans/registry-format.org= :: *THE container-format spec* (=GCR1=, now =v2= — see
   its § V1→V2). Byte layout, string codes, self-describing header, the
   user-built-blob licensing analysis.
 - =src/lib.rs= :: hand-written accessors (=REGISTRY_BLOB_ZSTD=,
@@ -214,7 +244,7 @@ since been put under git, tagged =v0.1.0=/=v0.1.1=, and published to crates.io
 (see the update note above). The R1 generator work added:
 =tools/gen_crs_registry.py= (implemented, and since fixed — see KEY FINDINGS
 =usages= bug), the generated =src/registry.bin.zst= (regenerated after the
-fix), =src/generated.rs=, =src/names.rs=, the =GCR1= spec =registry-format.org=,
+fix), =src/generated.rs=, =src/names.rs=, the =GCR1= spec =plans/registry-format.org=,
 and the =lib.rs= refactor (string-code =NAMES=, new =REGISTRY_BLOB_RAW_SIZE=).
 R2 added =tools/gen_esri_geographic_fixtures.py=/=gen_esri_projected_fixtures.py=
 (no changes to the generator itself, only new fixture-emitting scripts). R5
@@ -235,7 +265,7 @@ id, no =AXIS=, non-standard datum names).
 Verified: id-less Esri geographic mis-identifies (NAD83 → EPSG:9309, WGS84 → 70%);
 projected Esri is axis-ambiguous and declines. Root cause is the *missing id*, not
 parsing. The fix is *name → (authority, code) → authoritative definition*, all
-derivable at build time from =proj.db=. See =crs-registry.org= for the full
+derivable at build time from =proj.db=. See =plans/crs-registry.org= for the full
 argument, sizes, and identity-recovery/validation design.
 
 ** KEY FINDINGS (so you don't relearn them the hard way)
@@ -379,24 +409,25 @@ argument, sizes, and identity-recovery/validation design.
   priority since declining is already the safe outcome). Confirms the
   strict-fallback discipline holds under real breadth, not just the three
   cases the plan happened to measure by hand.
-- *R3's "delete what the registry makes redundant" framing is a trap for the
-  default build — don't implement it literally.* =geosetta/src/crs.rs= only
-  feature-gates the registry module itself (=#[cfg(feature = "crs-registry")]
-  mod registry;=); =wkt_projjson.rs=/=wkt1_tables.rs= (the structural crosswalk)
-  are compiled *unconditionally*, shared by both builds. The default
-  (=crs-registry=-off) build has *no* fallback if crosswalk coverage is
-  deleted — it's the default build's *only* resolution mechanism, not a
-  redundant validator, for anyone without the feature on. Any literal
-  deletion of crosswalk entries "because the registry covers that code" would
-  silently regress default-build correctness with nothing to replace it,
-  directly breaking the degraded-mode contract's own promise. Two honest
-  versions of R3: (a) don't delete anything — R1/R2's priority ordering
-  (registry tried first) already achieves "structural path becomes
-  validator/fallback" in *behavior*, so R3 is largely already done; or (b)
-  feature-gate the crosswalk itself so each build gets its own coverage —
-  materially bigger (two maintained crosswalk surfaces) and doesn't even
-  shrink the default build, only the feature build's compiled size. Treat R3
-  as low-value/high-risk relative to R4 until re-scoped.
+- *R3's "delete what the registry makes redundant" framing was a trap for the
+  default build — closed instead via option (a), not implemented literally
+  (user decision, 2026-08-16).* =geosetta/src/crs.rs= only feature-gates the
+  registry module itself (=#[cfg(feature = "crs-registry")] mod registry;=);
+  =wkt_projjson.rs=/=wkt1_tables.rs= (the structural crosswalk) are compiled
+  *unconditionally*, shared by both builds. The default (=crs-registry=-off)
+  build has *no* fallback if crosswalk coverage is deleted — it's the default
+  build's *only* resolution mechanism, not a redundant validator, for anyone
+  without the feature on. Any literal deletion of crosswalk entries "because
+  the registry covers that code" would silently regress default-build
+  correctness with nothing to replace it, directly breaking the
+  degraded-mode contract's own promise. Two honest versions of R3 were
+  weighed: (a) don't delete anything — R1/R2's priority ordering (registry
+  tried first) already achieves "structural path becomes validator/fallback"
+  in *behavior*, so R3 is largely already done; or (b) feature-gate the
+  crosswalk itself so each build gets its own coverage — materially bigger
+  (two maintained crosswalk surfaces) and doesn't even shrink the default
+  build, only the feature build's compiled size. *Chosen: (a), closed, no
+  code changes.*
 - *=--single-line= is not a hard guarantee — a handful of EPSG =AREA=
   descriptions carry a literal embedded newline byte in the source data
   itself, found by R5's WKT2 bulk oracle (2026-08-12).* Two EPSG codes
@@ -530,10 +561,10 @@ Embedding =proj.db= ships multi-source data. Terms verified: PROJ (MIT), *Esri*
 projection-engine-db-doc (*Apache-2.0*), IGNF (IGN open licence), *EPSG/IOGP*
 (EPSG Terms of Use — redistribution/derived OK *with* the IOGP acknowledgement, no
 charge for the data, mark modifications), IAU/NKG (public geodesy). =NOTICE= is
-drafted in this dir. *Open item needing the user:* sign-off on the exact EPSG/IOGP
-=NOTICE= wording, and drop the real Apache-2.0 text into =LICENSES/=. If a source's
-terms ever block redistribution, scope that authority out and resolve via
-=proj.db='s =supersession= table.
+drafted in this dir; wording *signed off by the user, 2026-08-16*. The real
+Apache-2.0 text is already in =LICENSES/=. If a source's terms ever block
+redistribution, scope that authority out and resolve via =proj.db='s
+=supersession= table.
 
 ** R1 MILESTONE DETAIL (done; see TL;DR above for current overall status)
 All four R1 steps landed:
@@ -575,10 +606,9 @@ and_covers_wkt1_gap= (13 790/13 790 covered, 13 735 @ 100%, 55 documented
 gaps, 0 unexpected) — already run and green, not just written. =cargo clippy
 --all-targets= clean both ways — see § HOW TO VERIFY.
 
-*Next:* R2 (both scopes), R4, and now R5 are all done. Only *R3* remains,
-and it needs re-scoping before touching — see the KEY FINDINGS entry on its
-default-build risk; likely already achieved in behavior via R1/R2's
-try-order, not worth a literal crosswalk deletion.
+*Next:* R1–R5 are all done — R2, R4, R5 by implementation; R3 closed
+2026-08-16 via option (a) (see the KEY FINDINGS entry), no code changes
+needed since R1/R2's try-order already achieves it in behavior.
 
 ** SHAPEFILE (R4) MILESTONE DETAIL (done; implemented and shipped 2026-08-12, geosetta 0.21.0)
 Full read+write =plans/shapefile.org= spoke, both directions (see
@@ -683,5 +713,6 @@ Tests: 189 passed default (up from 152 at R1 completion / 156 at R2), 203 with
 - Plans are org-mode; match the house style.
 
 ** OPEN QUESTIONS FOR THE USER
-- EPSG/IOGP =NOTICE= wording sign-off (release gate).
+- ~~EPSG/IOGP =NOTICE= wording sign-off (release gate).~~ *Signed off by the
+  user, 2026-08-16.*
 - Whether/when to promote =crs-registry= to a *default* feature (plan says at R1).

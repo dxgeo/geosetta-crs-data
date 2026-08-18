@@ -42,7 +42,7 @@ generator bug: a few EPSG =AREA= descriptions carry a literal embedded newline
 in the source data, surviving into WKT2 text even under =--single-line= and
 truncating =parse_sections='s naive first-line capture — fixed by accumulating
 lines until the next real header instead. See =crs-registry.org='s R5 section
-and =handoff.org= § KEY FINDINGS for the full writeup.
+and =../handoff.org= § KEY FINDINGS for the full writeup.
 
 ** DESIGN GOALS
 - *Zero-copy lookup.* Decompress once; answer =def_projjson(auth, code)= /

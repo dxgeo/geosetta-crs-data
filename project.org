@@ -1,0 +1,214 @@
+#+TITLE: Geoscribe
+#+AUTHOR: Daniel Okuniewicz Jr.
+#+DATE: {{{time(%Y-%m-%d)}}}
+#+EXPORT_FILENAME: project
+
+* Geoscribe
+
+** OVERVIEW
+Geoscribe is a *geospatial metadata reader/writer*: it owns the metadata a
+consumer like [[https://github.com/dxgeo/geosetta][Geosetta]] needs but can't
+just carry through unchanged from a source — anything that has to be *resolved
+or computed*, not copied. Two capabilities today:
+
+- An embedded *CRS registry* — coordinate reference system definitions
+  (PROJJSON + WKT1 + WKT2:2019) plus a name → =(authority, code)= index,
+  covering *all 13,790 CRSes in PROJ's =proj.db== — every authority (EPSG,
+  ESRI, IGNF, OGC, IAU_2015 planetary, PROJ, NKG) and type. The original
+  reason this crate exists at all: PROJ/EPSG/Esri/IGN/IAU/NKG's data terms
+  don't belong bundled into a pure-MIT library by default (see [[file:NOTICE][NOTICE]]), so
+  the *data* lives here, isolated. Design:
+  [[file:plans/crs-registry.org][plans/crs-registry.org]]. On top of the
+  trusted-id lookup sits *identification*: recovering a CRS from an /id-less/
+  WKT (an Esri-flavor Shapefile =.prj=, which carries no =AUTHORITY= node) by
+  its name, validated against that WKT's own ellipsoid —
+  [[file:plans/wkt-identify.org][plans/wkt-identify.org]].
+- Dimension-aware geometry *envelope (bounding-box) computation* — scoping
+  only so far, see
+  [[file:plans/envelope-computation.org][plans/envelope-computation.org]].
+  Unlike the CRS registry this needs no embedded dataset at all — it's pure
+  arithmetic over a geometry's own coordinates — but it's the same *shape* of
+  problem (a value the consumer must derive, not one the source handed it),
+  which is why it lands here rather than in =geosetta= itself.
+
+Originally built as just the CRS registry for Geosetta; broadened to this wider
+charter on 2026-08-17 once envelope computation showed the "isolate third-party
+data" rationale was really one instance of a bigger one: *own whatever
+geospatial metadata isn't a simple pass-through.* Kept as a standalone,
+reusable crate rather than data/logic owned by Geosetta itself.
+
+** ARCHITECTURE
+Geoscribe is the *shared leaf* of the three-crate graph: both =geosetta= and
+=nazca= may optionally depend on it, and it depends on neither — see
+[[file:../architecture.org][../architecture.org]] for the full graph and the
+two boundary rules that govern it. Priorities, in order:
+
+- *Own the metadata so consumers don't re-derive it.* Decoding (zstd) and
+  lookup are owned *here* (=resolve=/=resolve_by_name=/=all=), not shipped as
+  a raw blob each consumer must decode itself. =geosetta='s own copy of that
+  logic was deleted when it switched to calling through
+  ([[file:plans/public-api.org][plans/public-api.org]]).
+- *Text at the boundary.* =resolve()= returns a =CrsRecord= of *strings*
+  (PROJJSON, WKT, WKT2), not a parsed Rust struct — consumers parse into their
+  own representation on their own side. These are external, spec-defined
+  formats neither crate owns, so there is nothing to couple on.
+- *No external dependencies.* Including the zstd decoder, which is this
+  crate's own from-scratch port, deliberately independent of =geosetta='s —
+  documented duplication, not an oversight
+  ([[file:plans/public-api.org][plans/public-api.org]] § MODULE LAYOUT).
+- *Keep the consumer pure-MIT by default.* This is why the data is isolated
+  here at all. =geosetta= took it further in its 0.24.0 and dropped the
+  dependency altogether — its =crs-registry= feature is gone — composing with
+  this crate over a *pipe* instead (=geosetta --print-crs-code= /
+  =--crs <path|->=). Nothing here assumes a consumer links against it; the CLI
+  is a first-class interface, not a convenience wrapper.
+- *Answer, or say why not — never guess.* The trusted-id path
+  (=resolve=) is exact. Everything weaker states its evidence: =resolve_by_name=
+  returns candidates and validates nothing, =identify_from_wkt= validates
+  against the input's own ellipsoid and reports [[file:plans/wkt-identify.org][ambiguity]]
+  rather than picking one of several equally-supported answers by sort order.
+- *Generated, pinned, oracle-gated.* The embedded data is generated from
+  =proj.db= by =tools/gen_crs_registry.py=, never hand-edited, and gated on an
+  oracle: every embedded definition must round-trip at =projinfo --identify=.
+
+** STATUS
+*Built, not yet published under this name.* =v0.2.0= shipped on crates.io under
+this crate's original name, =geosetta-crs-data=
+([[https://crates.io/crates/geosetta-crs-data][crates.io]]). The crate has since
+been renamed to =geoscribe= ([[https://github.com/dxgeo/geoscribe][GitHub]]) —
+GitHub rename done. Publishing =v0.4.0= (R6's public API plus
+=identify_from_wkt=) under =geoscribe= is next; once live, every =geosetta-crs-data= version gets yanked
+to point dependents at the new name.
+
+The CRS registry is *done* (=crs-registry.org= R1–R5, =public-api.org= R6a–R6d),
+as is id-less WKT identification (=wkt-identify.org=); envelope computation is
+*scoping only*. See
+[[file:plans/README.org][plans/README.org]] for the plan index and
+[[file:plans/todo.org][plans/todo.org]] for what's open right now. A session
+picking up the CRS work should start at [[file:handoff.org][handoff.org]].
+
+** IMPLEMENTATION
+- =src/lib.rs= :: the public surface — =resolve=, =resolve_by_name=, =all=,
+  =CrsRecord=, =CRS_COUNT=, =DATASET_VERSIONS=.
+- =src/registry.rs= :: =GCR1= decode + lookup internals (binary search over a
+  sorted fixed-width index; decode-once behind a =OnceLock=).
+- =src/zstd.rs= :: this crate's own zstd decoder (RFC 8878, from scratch).
+- =src/identify.rs= :: =identify_from_wkt= — name lookup validated against the
+  WKT's own ellipsoid, returning =Identity::{Unique, Ambiguous, Unidentified}=.
+  The trust policy that sits *on top of* =resolve_by_name=, and the one place
+  in this crate that weighs evidence rather than reporting it
+  ([[file:plans/wkt-identify.org][plans/wkt-identify.org]]).
+- =src/wkt.rs=, =src/json.rs= :: a shallow WKT lexer and a minimal read-only
+  JSON reader, both feeding =identify.rs= only. Ported rather than shared —
+  same reasoning as the zstd decoder; see each module's header.
+- =src/main.rs= :: the =geoscribe= CLI — the trusted-id lookup, plus
+  =--identify= for id-less WKT. Still never exposes the raw, unvalidated
+  =resolve_by_name=.
+- =tests/= :: the Esri corpus (431 geographic + 2,274 projected real
+  =WKT1_ESRI= exports) behind =identify_esri.rs=, and the CLI's stdout/stderr/
+  exit-status contracts behind =cli_identify.rs=.
+- =src/generated.rs=, =src/names.rs=, =src/registry.bin.zst= :: generated —
+  the =GCR1= v2 blob (1.07 MB compressed, 13,790 CRSes), the name →
+  =(authority, code)= index (20,760 entries), and the stamped sizes/versions.
+- =tools/= :: build-time generators; need PROJ's =projinfo= and =proj.db=.
+  Container format: [[file:plans/registry-format.org][plans/registry-format.org]].
+
+** USAGE
+As a library:
+
+#+begin_src rust
+let rec = geoscribe::resolve("EPSG", "4326").expect("EPSG:4326 present");
+assert!(rec.wkt.is_some());  // None for the ~4% of entries WKT1 can't express
+assert!(rec.wkt2.is_some()); // present for effectively every entry
+
+for (authority, code) in geoscribe::resolve_by_name("GCS_WGS_1984") {
+    // multiple authorities can share a catalog name — this is a raw lookup
+    // that validates nothing; see plans/public-api.org § BOUNDARY
+}
+
+// Or let the crate do the validating: identify an id-less .prj by name,
+// checked against its own ellipsoid. Never guesses, never picks.
+match geoscribe::identify_from_wkt(&std::fs::read_to_string("parcels.prj")?) {
+    geoscribe::Identity::Unique(rec) => println!("{}:{}", rec.authority, rec.code),
+    geoscribe::Identity::Ambiguous(recs) => { /* several fit equally well */ }
+    geoscribe::Identity::Unidentified => { /* nothing fits — decline */ }
+}
+#+end_src
+
+As a CLI — writes exactly the requested definition to stdout, nothing else, so
+it composes with anything that wants a WKT/PROJJSON string on a pipe:
+
+#+begin_src sh
+geoscribe EPSG:4326                # PROJJSON (default — the one every entry has)
+geoscribe EPSG:3857 --wkt2         # WKT2:2019
+geoscribe OGC:CRS84 --wkt          # WKT1 (GDAL flavor); errors if absent
+ogr2ogr -a_srs $(geoscribe EPSG:4326) ...
+#+end_src
+
+Exit =1= with a message on stderr for an unknown code or a requested dialect
+the CRS doesn't have.
+
+=--identify= covers what an authority code can't: an id-less WKT, read from a
+file or stdin. It is the same output contract — the definition alone on stdout
+— so it drops straight into a pipeline:
+
+#+begin_src sh
+geoscribe --identify --projjson parcels.prj \
+  | geosetta parcels.shp parcels.parquet --crs -
+#+end_src
+
+This is *weaker evidence* than a stated code (a name plus an ellipsoid), so it
+declines rather than guessing, and where several real CRSes fit equally well it
+writes *nothing* to stdout, lists them on stderr, and exits =2=:
+
+#+begin_src sh
+$ geoscribe --identify utm.prj
+geoscribe: 2 CRSes match this WKT's name and ellipsoid equally well;
+re-run with the one you want (or --all to list them):
+  EPSG:6339
+  ESRI:102057
+$ geoscribe --identify --all utm.prj    # the codes alone, for adjudication
+EPSG:6339
+ESRI:102057
+$ geoscribe EPSG:6339 --wkt2            # then resolve the one you chose
+#+end_src
+
+An empty stdout is deliberate: =geosetta --crs -= hard-errors on an empty
+override, so an ambiguous or failed identification fails the pipeline loudly
+instead of quietly writing a mislabeled file.
+
+** ROADMAP
+- *Publish =v0.4.0= under the =geoscribe= name*, then yank the old
+  =geosetta-crs-data= versions. The nearest-term item; see
+  [[file:plans/todo.org][plans/todo.org]].
+- [[file:plans/public-api.org][plans/public-api.org]] *R6e* — the acceptance
+  test: a consumer with no =geosetta= dependency (=nazca=) resolving a real
+  code through this crate alone. Open.
+- *Ambiguity is common enough to be worth revisiting* — over the Esri corpus,
+  109 of 431 geographic and 890 of 2,274 projected =.prj= exports match more
+  than one registry CRS equally well (typically a deprecated ESRI code beside
+  its live EPSG twin). The blob carries no deprecation flag, so nothing here
+  can prefer one honestly today; adding that to =GCR1= would resolve most of
+  them. See [[file:plans/wkt-identify.org][plans/wkt-identify.org]] § OPEN QUESTIONS.
+- [[file:plans/envelope-computation.org][plans/envelope-computation.org]] —
+  dimension-aware bbox computation, the second capability under the broadened
+  charter. Scoping only; gated on deciding how a non-CRS capability gates into
+  =geosetta='s Cargo features.
+- *Registry currency* — the embedded data is only as current as the =proj.db=
+  it was generated from; a newer EPSG release means regenerating *and*
+  re-checking attribution ([[file:plans/crs-registry.org][plans/crs-registry.org]]
+  § ATTRIBUTION). No trigger for this exists today.
+- *Charter discipline* — "own whatever geospatial metadata isn't a simple
+  pass-through" is an easy bar to satisfy sloppily. The next capability should
+  face the same scrutiny =envelope-computation.org= did (explicit alternatives,
+  explicit "why here and not in =geosetta="), not less.
+
+*Non-goals*, unchanged: reprojection / coordinate transformation (that's
+=nazca=), embedding the *transformation* dataset (Helmert/grid pipelines —
+only CRS *definitions* are embedded), and any live runtime dependency on
+PROJ/GDAL.
+
+** LICENSE
+MIT for the Rust code ([[file:LICENSE][LICENSE]]). The embedded CRS *data* is a
+derived representation of PROJ/EPSG/Esri/IGN/IAU/NKG and is governed by those
+sources' terms — see [[file:NOTICE][NOTICE]] and [[file:LICENSES/][LICENSES/]].

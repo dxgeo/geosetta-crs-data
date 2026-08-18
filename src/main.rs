@@ -2,23 +2,49 @@
 //!
 //! ```text
 //! geoscribe <AUTHORITY:CODE> [--wkt | --wkt2 | --projjson]
+//! geoscribe --identify [--all] [--wkt | --wkt2 | --projjson] [FILE | -]
 //! ```
 //!
-//! Resolves a trusted `(authority, code)` pair (e.g. `EPSG:4326`) to its
-//! authoritative definition and writes exactly that string to stdout — no
-//! extra decoration — so it composes with anything downstream that wants a
-//! WKT/PROJJSON string on a pipe or in a file (`ogr2ogr -a_srs $(geoscribe
-//! ...)`, `geoscribe EPSG:4326 --wkt2 > crs.wkt`, ...). Exit status: `0` on a
-//! resolved match, `1` on any error (bad usage, unknown authority/code, or a
-//! requested dialect the CRS doesn't have — e.g. `--wkt` for one of the ~4%
-//! of entries with no WKT1; see [`geoscribe::CrsRecord`]).
+//! The first form resolves a trusted `(authority, code)` pair (e.g.
+//! `EPSG:4326`) to its authoritative definition and writes exactly that string
+//! to stdout — no extra decoration — so it composes with anything downstream
+//! that wants a WKT/PROJJSON string on a pipe or in a file (`ogr2ogr -a_srs
+//! $(geoscribe ...)`, `geoscribe EPSG:4326 --wkt2 > crs.wkt`, ...).
+//!
+//! The second form covers the case the first cannot: an *id-less* WKT — an
+//! Esri-flavor Shapefile `.prj`, which carries no `AUTHORITY` node, so there
+//! is no pair to look up. It reads that WKT (from `FILE`, or stdin) and
+//! identifies it by name, validated against the WKT's own ellipsoid
+//! ([`geoscribe::identify_from_wkt`]). The payoff, on the `geosetta` side:
+//!
+//! ```text
+//! geoscribe --identify --projjson parcels.prj \
+//!   | geosetta parcels.shp parcels.parquet --crs -
+//! ```
+//!
+//! `--identify` is *weaker evidence* than the trusted-id form — a name plus an
+//! ellipsoid, not a stated code — which is why it never guesses and never
+//! picks. Where several real CRSes share a name and an ellipsoid it writes
+//! *nothing* to stdout, lists the candidates on stderr, and exits `2`, leaving
+//! the choice to whoever can actually make it. `--all` prints those candidates
+//! as `AUTHORITY:CODE` lines on stdout for a human to adjudicate; that output
+//! is a list of codes, not a definition, so it is for reading, not for piping
+//! into a `--crs` flag.
+//!
+//! Exit status: `0` on success, `2` on an ambiguous `--identify`, `1` on any
+//! other error (bad usage, unknown authority/code, unreadable input, no
+//! identification, or a requested dialect the CRS doesn't have — e.g. `--wkt`
+//! for one of the ~4% of entries with no WKT1; see [`geoscribe::CrsRecord`]).
 //!
 //! Deliberately does *not* expose [`geoscribe::resolve_by_name`] — that's a
-//! weaker-evidence lookup (multiple authorities can share a name, so it
-//! returns candidates, not an answer) that needs a caller-side trust policy
-//! on top of it (see `public-api.org` § BOUNDARY). This CLI only does the
-//! trusted-id lookup, so its output is always safe to pipe without a human
-//! eyeballing it first.
+//! raw lookup returning candidates with no validation at all, which needs a
+//! caller-side trust policy on top of it (`plans/public-api.org` § BOUNDARY).
+//! `--identify` is that policy, applied and documented as the weaker mode;
+//! `resolve_by_name` itself stays library-only.
+
+use std::io::Read;
+
+use geoscribe::Identity;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Dialect {
@@ -27,37 +53,149 @@ enum Dialect {
     Wkt2,
 }
 
+/// Where `--identify` reads its WKT from.
+#[derive(Clone, Debug, PartialEq)]
+enum Source {
+    Stdin,
+    Path(String),
+}
+
+#[derive(Debug, PartialEq)]
+enum Mode {
+    /// Trusted-id lookup — the default form.
+    Resolve { authority: String, code: String },
+    /// Identify an id-less WKT. `list_all` swaps the definition on stdout for
+    /// the `AUTHORITY:CODE` list of every validating candidate.
+    Identify { source: Source, list_all: bool },
+}
+
+#[derive(Debug, PartialEq)]
 struct Args {
-    authority: String,
-    code: String,
+    mode: Mode,
     dialect: Dialect,
 }
 
-const USAGE: &str = "usage: geoscribe <AUTHORITY:CODE> [--wkt | --wkt2 | --projjson]\n  e.g. geoscribe EPSG:4326 --wkt2\n  default dialect is --projjson (the one every entry has)";
+/// Exit status for an ambiguous `--identify`, distinct from `1` so a script
+/// can tell "several CRSes fit, pick one" from "nothing fits" without parsing
+/// stderr.
+const EXIT_AMBIGUOUS: i32 = 2;
+
+const USAGE: &str = "usage: geoscribe <AUTHORITY:CODE> [--wkt | --wkt2 | --projjson]\n       geoscribe --identify [--all] [--wkt | --wkt2 | --projjson] [FILE | -]\n  e.g. geoscribe EPSG:4326 --wkt2\n       geoscribe --identify --projjson parcels.prj\n  default dialect is --projjson (the one every entry has)\n  --identify reads an id-less WKT (a Shapefile .prj) from FILE or stdin and\n  identifies it by name, validated against its own ellipsoid; it exits 2\n  without printing when several CRSes fit. --all lists those candidates.";
 
 fn main() {
-    if let Err(e) = run() {
-        eprintln!("geoscribe: {e}");
-        std::process::exit(1);
+    match run() {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("geoscribe: {}", e.message);
+            std::process::exit(e.status);
+        }
     }
 }
 
-fn run() -> Result<(), String> {
-    let args = parse(std::env::args())?;
-    let rec = geoscribe::resolve(&args.authority, &args.code)
-        .ok_or_else(|| format!("no match for {}:{}", args.authority, args.code))?;
+/// A CLI failure: what to print, and what to exit with.
+struct Failure {
+    message: String,
+    status: i32,
+}
 
-    let (out, dialect_name) = match args.dialect {
+impl From<String> for Failure {
+    fn from(message: String) -> Failure {
+        Failure { message, status: 1 }
+    }
+}
+
+fn run() -> Result<(), Failure> {
+    let args = parse(std::env::args())?;
+    match args.mode {
+        Mode::Resolve { authority, code } => {
+            let rec = geoscribe::resolve(&authority, &code)
+                .ok_or_else(|| format!("no match for {authority}:{code}"))?;
+            println!("{}", dialect_of(&rec, args.dialect, &authority, &code)?);
+            Ok(())
+        }
+        Mode::Identify { source, list_all } => identify(source, list_all, args.dialect),
+    }
+}
+
+fn identify(source: Source, list_all: bool, dialect: Dialect) -> Result<(), Failure> {
+    let text = read_source(&source)?;
+    if text.trim().is_empty() {
+        return Err(format!("{}: no WKT to identify (input was empty)", source_label(&source)).into());
+    }
+
+    match geoscribe::identify_from_wkt(&text) {
+        Identity::Unique(rec) if list_all => {
+            println!("{}:{}", rec.authority, rec.code);
+            Ok(())
+        }
+        Identity::Unique(rec) => {
+            println!("{}", dialect_of(&rec, dialect, rec.authority, rec.code)?);
+            Ok(())
+        }
+        Identity::Ambiguous(recs) if list_all => {
+            for rec in recs {
+                println!("{}:{}", rec.authority, rec.code);
+            }
+            Ok(())
+        }
+        // Nothing on stdout: a pipeline that feeds this onward must fail
+        // loudly rather than receive one of several equally-supported answers.
+        Identity::Ambiguous(recs) => {
+            let list = recs
+                .iter()
+                .map(|r| format!("  {}:{}", r.authority, r.code))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Err(Failure {
+                message: format!(
+                    "{} CRSes match this WKT's name and ellipsoid equally well; \
+                     re-run with the one you want (or --all to list them):\n{list}",
+                    recs.len()
+                ),
+                status: EXIT_AMBIGUOUS,
+            })
+        }
+        Identity::Unidentified => Err(format!(
+            "could not identify {}: no registry CRS matches its name and ellipsoid",
+            source_label(&source)
+        )
+        .into()),
+    }
+}
+
+fn dialect_of(
+    rec: &geoscribe::CrsRecord,
+    dialect: Dialect,
+    authority: &str,
+    code: &str,
+) -> Result<&'static str, Failure> {
+    let (out, name) = match dialect {
         Dialect::Projjson => (Some(rec.projjson), "PROJJSON"),
         Dialect::Wkt => (rec.wkt, "WKT1"),
         Dialect::Wkt2 => (rec.wkt2, "WKT2"),
     };
-    let out = out.ok_or_else(|| {
-        format!("{}:{} has no {dialect_name} representation", args.authority, args.code)
-    })?;
+    out.ok_or_else(|| format!("{authority}:{code} has no {name} representation").into())
+}
 
-    println!("{out}");
-    Ok(())
+fn read_source(source: &Source) -> Result<String, Failure> {
+    let mut text = String::new();
+    match source {
+        Source::Stdin => std::io::stdin()
+            .read_to_string(&mut text)
+            .map(|_| ())
+            .map_err(|e| format!("reading stdin: {e}")),
+        Source::Path(path) => std::fs::read_to_string(path)
+            .map(|s| text = s)
+            .map_err(|e| format!("reading \"{path}\": {e}")),
+    }?;
+    Ok(text)
+}
+
+fn source_label(source: &Source) -> String {
+    match source {
+        Source::Stdin => "stdin".to_string(),
+        Source::Path(p) => format!("\"{p}\""),
+    }
 }
 
 /// Parse arguments from an iterator (typically `std::env::args()`), whose
@@ -67,7 +205,9 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
     let _program = iter.next();
 
     let mut dialect = Dialect::Projjson;
-    let mut id: Option<String> = None;
+    let mut identify = false;
+    let mut list_all = false;
+    let mut positional: Option<String> = None;
 
     for arg in iter {
         match arg.as_str() {
@@ -75,25 +215,44 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
             "--projjson" => dialect = Dialect::Projjson,
             "--wkt" => dialect = Dialect::Wkt,
             "--wkt2" => dialect = Dialect::Wkt2,
-            other if other.starts_with('-') => {
+            "--identify" => identify = true,
+            "--all" => list_all = true,
+            // `-` alone is the conventional "stdin" positional, not a flag.
+            other if other.starts_with('-') && other != "-" => {
                 return Err(format!("unknown option \"{other}\"\n{USAGE}"));
             }
-            _ if id.is_none() => id = Some(arg),
+            _ if positional.is_none() => positional = Some(arg),
             _ => return Err(format!("unexpected extra argument \"{arg}\"\n{USAGE}")),
         }
     }
 
-    let id = id.ok_or_else(|| USAGE.to_string())?;
-    let (authority, code) = id
-        .split_once(':')
-        .ok_or_else(|| format!("expected AUTHORITY:CODE (e.g. EPSG:4326), got \"{id}\""))?;
-    if authority.is_empty() || code.is_empty() {
-        return Err(format!("expected AUTHORITY:CODE (e.g. EPSG:4326), got \"{id}\""));
+    if !identify {
+        if list_all {
+            return Err(format!("--all applies to --identify only\n{USAGE}"));
+        }
+        let id = positional.ok_or_else(|| USAGE.to_string())?;
+        let (authority, code) = id
+            .split_once(':')
+            .ok_or_else(|| format!("expected AUTHORITY:CODE (e.g. EPSG:4326), got \"{id}\""))?;
+        if authority.is_empty() || code.is_empty() {
+            return Err(format!("expected AUTHORITY:CODE (e.g. EPSG:4326), got \"{id}\""));
+        }
+        return Ok(Args {
+            mode: Mode::Resolve {
+                authority: authority.to_string(),
+                code: code.to_string(),
+            },
+            dialect,
+        });
     }
 
+    let source = match positional {
+        None => Source::Stdin,
+        Some(p) if p == "-" => Source::Stdin,
+        Some(p) => Source::Path(p),
+    };
     Ok(Args {
-        authority: authority.to_string(),
-        code: code.to_string(),
+        mode: Mode::Identify { source, list_all },
         dialect,
     })
 }
@@ -106,12 +265,17 @@ mod tests {
         parse(items.iter().map(|s| s.to_string()))
     }
 
+    fn resolve_mode(items: &[&str]) -> (String, String) {
+        match args(items).unwrap().mode {
+            Mode::Resolve { authority, code } => (authority, code),
+            other => panic!("expected Resolve, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parses_authority_code() {
-        let a = args(&["geoscribe", "EPSG:4326"]).unwrap();
-        assert_eq!(a.authority, "EPSG");
-        assert_eq!(a.code, "4326");
-        assert_eq!(a.dialect, Dialect::Projjson);
+        assert_eq!(resolve_mode(&["geoscribe", "EPSG:4326"]), ("EPSG".into(), "4326".into()));
+        assert_eq!(args(&["geoscribe", "EPSG:4326"]).unwrap().dialect, Dialect::Projjson);
     }
 
     #[test]
@@ -120,9 +284,7 @@ mod tests {
         // split must not assume a numeric code, and must not choke if a code
         // ever contained a colon itself (none do today, but split_once keeps
         // everything after the first ':' rather than requiring exactly one).
-        let a = args(&["geoscribe", "OGC:CRS84"]).unwrap();
-        assert_eq!(a.authority, "OGC");
-        assert_eq!(a.code, "CRS84");
+        assert_eq!(resolve_mode(&["geoscribe", "OGC:CRS84"]), ("OGC".into(), "CRS84".into()));
     }
 
     #[test]
@@ -141,5 +303,55 @@ mod tests {
         assert!(args(&["geoscribe", ":4326"]).is_err()); // empty authority
         assert!(args(&["geoscribe", "EPSG:4326", "--bogus"]).is_err());
         assert!(args(&["geoscribe", "EPSG:4326", "OGC:CRS84"]).is_err()); // two positionals
+    }
+
+    #[test]
+    fn identify_defaults_to_stdin() {
+        let a = args(&["geoscribe", "--identify"]).unwrap();
+        assert_eq!(a.mode, Mode::Identify { source: Source::Stdin, list_all: false });
+        assert_eq!(a.dialect, Dialect::Projjson);
+    }
+
+    #[test]
+    fn identify_takes_a_path_or_a_dash() {
+        assert_eq!(
+            args(&["geoscribe", "--identify", "parcels.prj"]).unwrap().mode,
+            Mode::Identify { source: Source::Path("parcels.prj".into()), list_all: false }
+        );
+        // `-` is the conventional stdin positional, not an unknown flag.
+        assert_eq!(
+            args(&["geoscribe", "--identify", "-"]).unwrap().mode,
+            Mode::Identify { source: Source::Stdin, list_all: false }
+        );
+    }
+
+    #[test]
+    fn identify_composes_with_every_dialect_flag() {
+        // `--identify` says where the *input* comes from; the dialect flags say
+        // what the output looks like. They are orthogonal by design.
+        for (flag, want) in [("--wkt", Dialect::Wkt), ("--wkt2", Dialect::Wkt2), ("--projjson", Dialect::Projjson)] {
+            let a = args(&["geoscribe", "--identify", flag, "parcels.prj"]).unwrap();
+            assert_eq!(a.dialect, want);
+            assert!(matches!(a.mode, Mode::Identify { .. }));
+        }
+    }
+
+    #[test]
+    fn all_requires_identify() {
+        assert_eq!(
+            args(&["geoscribe", "--identify", "--all"]).unwrap().mode,
+            Mode::Identify { source: Source::Stdin, list_all: true }
+        );
+        assert!(args(&["geoscribe", "EPSG:4326", "--all"]).is_err());
+        assert!(args(&["geoscribe", "--all"]).is_err());
+    }
+
+    #[test]
+    fn identify_does_not_parse_its_positional_as_an_authority_code() {
+        // A path is a path, even one with a colon in it.
+        assert_eq!(
+            args(&["geoscribe", "--identify", "a:b.prj"]).unwrap().mode,
+            Mode::Identify { source: Source::Path("a:b.prj".into()), list_all: false }
+        );
     }
 }

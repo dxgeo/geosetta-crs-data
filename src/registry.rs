@@ -3,8 +3,8 @@
 //!
 //! Ported from `geosetta`'s `src/crs/registry.rs` (where this used to live,
 //! `pub(crate)`-private to that crate) as part of R6 — see
-//! `public-api.org`. The wire format decoded here (`GCR1`) is specified in
-//! `registry-format.org`; read that alongside this file. The image is
+//! `plans/public-api.org`. The wire format decoded here (`GCR1`) is specified in
+//! `plans/registry-format.org`; read that alongside this file. The image is
 //! `(authority, code) -> {PROJJSON, WKT1, WKT2}`, sorted by
 //! `(auth_id, code_bytes)` so lookup is a binary search + slice — no
 //! per-entry allocation, no map build.
@@ -24,13 +24,13 @@ use crate::CrsRecord;
 const MAGIC: &[u8; 4] = b"GCR1";
 const HEADER_SIZE: usize = 64;
 /// v2 (R5) 32-byte record: v1's 24 bytes plus `wkt2_off`/`wkt2_len`, with the
-/// v1 `reserved` byte repurposed as `has_wkt2` — see `registry-format.org` §
+/// v1 `reserved` byte repurposed as `has_wkt2` — see `plans/registry-format.org` §
 /// V1 → V2. Only v2 blobs are produced or read; there was never a released v1
 /// blob to keep parsing.
 const RECORD_SIZE: usize = 32;
 /// Highest `format_version` this reader understands. A blob stamped higher
 /// declines cleanly (`None`) rather than partially reading — forward-compat per
-/// `registry-format.org` § VERSIONING.
+/// `plans/registry-format.org` § VERSIONING.
 const MAX_FORMAT_VERSION: u16 = 2;
 
 fn u16_at(buf: &[u8], off: usize) -> u16 {
@@ -70,7 +70,7 @@ fn parse_header(image: &[u8]) -> Option<Header> {
     })
 }
 
-/// One decoded index record — see `registry-format.org` § Index.
+/// One decoded index record — see `plans/registry-format.org` § Index.
 struct Record {
     auth_id: u8,
     key_off: usize,
@@ -121,7 +121,7 @@ impl Registry {
 
     fn slice_str(&self, off: usize, len: usize) -> &str {
         let start = self.header.payload_off + off;
-        // Generator guarantees UTF-8 (`registry-format.org` § LOOKUP ALGORITHM
+        // Generator guarantees UTF-8 (`plans/registry-format.org` § LOOKUP ALGORITHM
         // step 5); trust it rather than paying a validation pass per lookup.
         std::str::from_utf8(&self.image[start..start + len]).unwrap_or_default()
     }
@@ -156,7 +156,7 @@ impl Registry {
     }
 
     /// Binary search the sorted `(auth_id, code_bytes)` index. Comparison order
-    /// matches the generator's sort key exactly (`registry-format.org` § Index).
+    /// matches the generator's sort key exactly (`plans/registry-format.org` § Index).
     fn find(&self, auth: &str, code: &str) -> Option<Record> {
         let auth_id = self.lookup_authority(auth)?;
         let code_b = code.as_bytes();
@@ -461,7 +461,7 @@ mod tests {
         ("ESRI", "37253"),
     ];
 
-    // The registry oracle (`crs-registry.org` R1.4): every embedded definition
+    // The registry oracle (`plans/crs-registry.org` R1.4): every embedded definition
     // fed through `projinfo --identify` must return its own `(authority, code)`
     // at 100%, except the documented `KNOWN_IDENTIFY_GAPS`. For an authoritative
     // definition 100% holds by construction, so this mainly guards the
