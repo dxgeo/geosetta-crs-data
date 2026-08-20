@@ -4,7 +4,64 @@
 
 * Envelope (Bounding Box) Computation
 
-** STATUS -- SCOPING ONLY, NOT YET IMPLEMENTED
+** STATUS -- RETIRED 2026-08-18. DO NOT IMPLEMENT HERE.
+*This plan is superseded and its work has moved out of this crate.* Kept for
+the reasoning trail and the empirically-confirmed GPB findings below, both of
+which were carried over verbatim; nothing here should be built in =geoscribe=.
+
+New homes:
+- *The envelope fold, and the GeoPackage writer gap that prompted this plan* →
+  [[file:../../geosetta/plans/envelope.org][geosetta/plans/envelope.org]],
+  where it *shipped on 2026-08-19* (=Bbox= folds Z/M; an opt-in =--envelope=
+  flag writes the GPB envelope, matching GDAL's bytes ordinate for ordinate).
+  Note what the move cost: roughly eight lines in a =Bbox= that already
+  existed, against this plan's new =Coord=/=Envelope= pair plus a cross-crate
+  call that could not have been wired up.
+- *Transforming a bbox across CRSes* (never in this plan, surfaced by the same
+  discussion) →
+  [[file:../../nazca/plans/transform-bounds.org][nazca/plans/transform-bounds.org]].
+
+*Why it moved -- two independent reasons, either sufficient:*
+1. *The premise was factually wrong.* This plan opens by framing the envelope
+   as "a value =geosetta= doesn't have and must derive." =geosetta= already
+   has it: =Bbox= with =empty=/=add=/=is_empty= plus =Geometry::bbox()=/
+   =extend_bbox()= (=geosetta/src/geometry/mod.rs:212=, =:81=, =:88=), all
+   public (=lib.rs:71=), and already folded across every feature in
+   =convert.rs:129= to write *GeoParquet's =geo= bbox metadata* -- a format
+   spoke's write path, shipping today. § DESIGN's new =Coord=/=Envelope= pair
+   would have duplicated a type its only consumer already exports and uses.
+   The real gap is that =Bbox= is XY-only while =Position= has carried
+   =z=/=m= since =zm-geometry.org= M1 -- roughly eight lines, in the crate
+   that already owns the fold.
+2. *There was no delivery path.* § SCOPE's second layer is "=geosetta='s own
+   GeoPackage writer calls =geoscribe='s computation." As of
+   [[file:../../architecture.org][architecture.org]]'s 2026-08-18 revision the
+   three crates have no dependency edges, so =geosetta= cannot link this crate,
+   and the no-silent-exec decision rules out reaching it by subprocess. The
+   plan's central wiring step was unbuildable regardless of where the math sat.
+
+*One design question this plan raised and the successor answered*: § SCOPE
+here proposed "min/max Z if any position carries one; min/max M if any position
+carries one," and the GPB writer would have had to pick an envelope indicator
+from that. It stops at Z. An envelope is a *spatial* bound and M is a
+linear-referencing measure, so the spec's XYM/XYZM indicators have no query to
+accelerate -- and GDAL emits neither, across eight geometry families, under any
+creation option or =OGR_GPKG_*= config. The =Bbox= still *tracks* M (it is
+cheap, and the fold is dimension-generic); the GPB encoder just never emits it.
+
+*What did not move*: this crate's charter question (§ OPEN QUESTIONS, "where
+does 'not a simple pass-through' stop?") is not answered by relocating one
+capability. It is tracked in
+[[file:../../architecture.org][architecture.org]] § OPEN QUESTIONS.
+
+*Note on reading what follows*: the text below is preserved as written on
+2026-08-17 and describes a dependency graph (=geosetta= optionally depends on
+=geoscribe=) and a =geosetta= Cargo feature (=crs-registry=) that no longer
+exist. Its *empirical* content -- the GPB envelope layout, the fixture, the
+mixed-dimensionality semantics -- is still good, and is what
+=geosetta/plans/envelope.org= carries forward.
+
+** ORIGINAL PLAN AS WRITTEN 2026-08-17 (superseded -- see § STATUS)
 
 ** WHY
 

@@ -79,7 +79,12 @@ fn a_unique_identification_prints_the_definition_and_exits_zero() {
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert!(out.stdout.starts_with('{'), "expected PROJJSON, got {:?}", out.stdout);
     assert!(out.stdout.contains(r#""code":4326"#), "{}", out.stdout);
-    assert!(out.stderr.is_empty(), "stderr should be quiet: {}", out.stderr);
+    // stderr is *not* empty any more, by design: since `--identify` began using
+    // an inline id when the input carries one, a caller can no longer infer from
+    // the mode which evidence produced the answer, so the mode says. One line,
+    // and stdout is untouched — see `plans/projjson-identify.org` § DECISIONS.
+    assert_eq!(out.stderr.lines().count(), 1, "{:?}", out.stderr);
+    assert!(out.stderr.contains("EPSG:4326"), "{}", out.stderr);
 }
 
 #[test]
@@ -113,6 +118,147 @@ fn it_reads_from_a_file_as_well_as_stdin() {
     assert_eq!(from_file.stdout, from_stdin.stdout);
     // `-` is the explicit spelling of the stdin default.
     assert_eq!(run(&["--identify", "-"], Some(UNIQUE_PRJ)).stdout, from_stdin.stdout);
+}
+
+// --- PROJJSON input --------------------------------------------------------
+
+/// The definition `geosetta --print-crs` emits from an id-less GeoParquet: an
+/// Esri-flavor name, no root `id`, `datum` rather than `datum_ensemble`. Built by
+/// converting a Shapefile whose `.prj` has no `AUTHORITY` node, which is how such
+/// a file comes to exist at all.
+const IDLESS_PROJJSON: &str = r#"{"type":"GeographicCRS","name":"GCS_WGS_1984",
+    "datum":{"type":"GeodeticReferenceFrame","name":"D_WGS_1984",
+    "ellipsoid":{"name":"WGS_1984","semi_major_axis":6378137.0,
+    "inverse_flattening":298.257223563}}}"#;
+
+#[test]
+fn projjson_input_identifies_the_same_as_its_wkt_spelling() {
+    // The dialect gap this mode was extended to close: the same CRS, written the
+    // way a container format records it, must reach the same answer.
+    let from_projjson = run(&["--identify", "--projjson"], Some(IDLESS_PROJJSON));
+    let from_wkt = run(&["--identify", "--projjson"], Some(UNIQUE_PRJ));
+    assert_eq!(from_projjson.status, 0, "stderr: {}", from_projjson.stderr);
+    assert_eq!(from_projjson.stdout, from_wkt.stdout, "dialects must agree");
+    assert!(from_projjson.stderr.contains("by name"), "{}", from_projjson.stderr);
+}
+
+#[test]
+fn projjson_reads_from_a_file_and_from_stdin_alike() {
+    let dir = tmpdir("projjson");
+    let path = write_prj(&dir, "idless.projjson", IDLESS_PROJJSON);
+    let from_file = run(&["--identify", &path], None);
+    let from_stdin = run(&["--identify"], Some(IDLESS_PROJJSON));
+    assert_eq!(from_file.status, 0, "stderr: {}", from_file.stderr);
+    assert_eq!(from_file.stdout, from_stdin.stdout);
+    assert_eq!(run(&["--identify", "-"], Some(IDLESS_PROJJSON)).stdout, from_stdin.stdout);
+}
+
+#[test]
+fn every_dialect_flag_composes_with_projjson_input_too() {
+    // Input dialect is sniffed, output dialect is chosen, and the two never
+    // interact — which is why there is no input-dialect flag to collide with.
+    for (flag, starts) in [("--projjson", "{"), ("--wkt", "GEOGCS["), ("--wkt2", "GEOGCRS[")] {
+        let out = run(&["--identify", flag], Some(IDLESS_PROJJSON));
+        assert_eq!(out.status, 0, "{flag} stderr: {}", out.stderr);
+        assert!(out.stdout.starts_with(starts), "{flag} gave {:?}", out.stdout);
+    }
+}
+
+#[test]
+fn a_projjson_with_an_inline_id_is_identified_by_it() {
+    // Option (a) on the PROJJSON side, and the case that makes the pipeline one
+    // unconditional command: the caller does not have to know whether the file's
+    // CRS carries an id.
+    let with_id = r#"{"type":"GeographicCRS","name":"Anything At All",
+        "datum":{"name":"d","ellipsoid":{"name":"e","semi_major_axis":1,
+        "inverse_flattening":1}},"id":{"authority":"EPSG","code":4326}}"#;
+    let out = run(&["--identify", "--all"], Some(with_id));
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.stdout.trim_end(), "EPSG:4326");
+    assert!(out.stderr.contains("trusted"), "{}", out.stderr);
+    // Note the name and ellipsoid here are nonsense — proof the id was used and
+    // name recovery never ran, since that would have declined.
+}
+
+#[test]
+fn an_unresolvable_inline_id_falls_through_to_name_recovery() {
+    // An id that resolves to nothing carried no evidence after all; the name may
+    // still. Failing outright would be worse than the name answer we can give.
+    let bad_id = r#"{"type":"GeographicCRS","name":"GCS_WGS_1984",
+        "datum":{"type":"GeodeticReferenceFrame","name":"D_WGS_1984",
+        "ellipsoid":{"name":"WGS_1984","semi_major_axis":6378137.0,
+        "inverse_flattening":298.257223563}},
+        "id":{"authority":"EPSG","code":999999}}"#;
+    let out = run(&["--identify", "--all"], Some(bad_id));
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.stdout.trim_end(), "EPSG:4326");
+    assert!(out.stderr.contains("by name"), "and it says so: {}", out.stderr);
+}
+
+#[test]
+fn an_ambiguous_projjson_exits_two_with_empty_stdout() {
+    // The trust policy does not change with the dialect. "WGS 84" fits EPSG:4326
+    // and EPSG:4979 equally — same family, same ellipsoid, nothing to choose on.
+    let ambiguous = r#"{"type":"GeographicCRS","name":"WGS 84",
+        "datum_ensemble":{"name":"World Geodetic System 1984 ensemble",
+        "ellipsoid":{"name":"WGS 84","semi_major_axis":6378137,
+        "inverse_flattening":298.257223563}}}"#;
+    let out = run(&["--identify"], Some(ambiguous));
+    assert_eq!(out.status, 2, "stdout: {:?}", out.stdout);
+    assert!(out.stdout.is_empty(), "{:?}", out.stdout);
+    assert!(out.stderr.contains("EPSG:4326") && out.stderr.contains("EPSG:4979"), "{}", out.stderr);
+}
+
+#[test]
+fn json_that_is_not_a_crs_is_refused_as_json_not_as_wkt() {
+    // The sniff is total: a JSON document takes the JSON path and stays there.
+    // Falling back to the WKT tokenizer would turn a clear "this is not a CRS"
+    // into a confusing complaint about a `{`.
+    for text in [r#"{"hello":"world"}"#, "{}", r#"{"type":"GeographicCRS"}"#] {
+        let out = run(&["--identify"], Some(text));
+        assert_eq!(out.status, 1, "for {text:?}: {:?}", out.stdout);
+        assert!(out.stdout.is_empty(), "for {text:?}: {:?}", out.stdout);
+        assert!(
+            !out.stderr.to_lowercase().contains("wkt"),
+            "for {text:?} the message must not blame WKT: {}",
+            out.stderr
+        );
+    }
+}
+
+#[test]
+fn the_sniff_reads_leading_whitespace_and_inner_braces_correctly() {
+    // Leading whitespace is what a tool's stdout actually looks like, and a `{`
+    // anywhere after the first token does not make a WKT into JSON.
+    let padded = format!("\n\t  {IDLESS_PROJJSON}\n");
+    assert_eq!(run(&["--identify", "--all"], Some(&padded)).stdout.trim_end(), "EPSG:4326");
+
+    let wkt_with_brace = r#"GEOGCS["GCS_WGS_1984{not json}",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137.0,298.257223563]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]]"#;
+    let out = run(&["--identify"], Some(wkt_with_brace));
+    // The name no longer matches anything, but it must fail as *WKT* — declining
+    // to identify — not as malformed JSON.
+    assert_eq!(out.status, 1);
+    assert!(out.stderr.contains("could not identify"), "{}", out.stderr);
+}
+
+#[test]
+fn binary_input_says_it_is_not_a_definition() {
+    // Pointing --identify at a data file is an easy mistake — data files are
+    // where CRSes live. `std`'s "stream did not contain valid UTF-8" is accurate
+    // and no help; this names the actual mistake.
+    let dir = tmpdir("binary");
+    let path = dir.join("parcels.parquet");
+    // Invalid UTF-8, as any real container's bytes would be.
+    std::fs::write(&path, [0x50, 0x41, 0x52, 0x31, 0xff, 0xfe, 0x00, 0x80]).unwrap();
+
+    let out = run(&["--identify", path.to_str().unwrap()], None);
+    assert_eq!(out.status, 1);
+    assert!(out.stdout.is_empty(), "{:?}", out.stdout);
+    assert!(out.stderr.contains("not text"), "{}", out.stderr);
+    assert!(out.stderr.contains("data file"), "{}", out.stderr);
+    assert!(!out.stderr.contains("UTF-8"), "the std wording must not leak: {}", out.stderr);
+    // Tool-agnostic: it says what to do, never who should do it.
+    assert!(!out.stderr.contains("geosetta"), "{}", out.stderr);
 }
 
 // --- the ambiguous path ----------------------------------------------------
@@ -207,15 +353,26 @@ fn text_that_is_not_wkt_at_all_is_refused() {
 }
 
 #[test]
-fn a_wkt_that_already_carries_an_id_still_identifies_by_name() {
-    // `--identify` is for id-less text, but it must not choke on WKT that does
-    // carry an AUTHORITY node — a caller with such text should use the
-    // trusted-id form, and this just confirms the name path still lands on the
-    // same CRS rather than erroring.
+fn a_wkt_that_carries_an_id_is_identified_by_that_id() {
+    // Option (a): a stated id is strictly stronger evidence than a name, so it
+    // is used rather than ignored. The user piping a file's CRS does not know in
+    // advance whether it has one, and this is the tool answering that instead of
+    // the shell.
+    //
+    // The nested ids here are the point of the "shallowest wins" rule: the
+    // ellipsoid (7030), datum (6326), prime meridian (8901), and unit (9122) all
+    // carry their own, and only the root 4326 identifies the CRS.
     let with_id = r#"GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4326"]]"#;
     let out = run(&["--identify", "--all"], Some(with_id));
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    assert!(out.stdout.contains("EPSG:4326"), "{}", out.stdout);
+    assert_eq!(out.stdout.trim_end(), "EPSG:4326", "the id, not a candidate list");
+    assert!(out.stderr.contains("trusted"), "provenance must say so: {}", out.stderr);
+
+    // And the bare name "WGS 84" is genuinely ambiguous (EPSG:4326 vs 4979), so
+    // this is also proof the id path ran instead of name recovery.
+    let id_less = r#"GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563]]]"#;
+    let out = run(&["--identify", "--all"], Some(id_less));
+    assert_eq!(out.stdout.lines().count(), 2, "{:?}", out.stdout);
 }
 
 // --- the untouched trusted-id form ----------------------------------------

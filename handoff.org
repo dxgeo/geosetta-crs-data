@@ -26,10 +26,18 @@ Two things it describes are no longer the present tense:
    module and reimplemented here as =identify_from_wkt=
    ([[file:plans/wkt-identify.org][plans/wkt-identify.org]]), which also
    reverses =plans/public-api.org= § BOUNDARY — deliberately, argued in
-   § BOUNDARY -- RESOLVED. One behavior change worth knowing before reading
-   the R2 oracle numbers below: where several CRSes fit a WKT equally well it
-   now reports *all* of them instead of taking the first in =NAMES= order, so
-   the "327/431 resolved" figure below is now 218 unique + 109 ambiguous.
+   § BOUNDARY -- RESOLVED. Two behavior changes worth knowing before reading
+   the R2 oracle numbers below. First, where several CRSes fit a WKT equally
+   well it now reports *all* of them instead of taking the first in =NAMES=
+   order, so the "327/431 resolved" figure below became 218 unique + 109
+   ambiguous + 104 unidentified. Second, on 2026-08-19 the ellipsoid extractor
+   learned two shapes it had been silently declining on — *spheres* (WKT writes
+   inverse flattening =0=, PROJJSON a =radius=, so an Esri sphere could never
+   match the registry's) and *non-metre axes* (wrapped with a
+   =conversion_factor=) — which took that corpus to *321 unique + 110 ambiguous
+   + 0 unidentified*, and the projected one from (1306, 890, 78) to
+   (1383, 891, 0). Every one of the 2,705 real Esri rows now identifies. Found
+   by =projjson-identify.org='s strip-id oracle; see its § RESULTS.
 
 For current state rather than history, start at
 [[file:project.org][project.org]] and [[file:plans/todo.org][plans/todo.org]].

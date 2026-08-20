@@ -1,5 +1,6 @@
-//! A shallow WKT lexer plus the two extractors [`identify`](crate::identify)
-//! needs: the outer CRS name and the first ellipsoid's constants.
+//! A shallow WKT lexer plus the three extractors [`identify`](crate::identify)
+//! needs: the outer CRS name, the first ellipsoid's constants, and the CRS's
+//! own `AUTHORITY`/`ID` node when it has one.
 //!
 //! This crate *stores* WKT but had never parsed one until `identify_from_wkt`
 //! (see `plans/wkt-identify.org`). What it needs is not a WKT parser: WKT is a
@@ -8,8 +9,8 @@
 //! Nothing here interprets the projection a WKT describes.
 //!
 //! **Ported, not shared**, from `geosetta`'s `src/crs.rs` (`tokenize_wkt` /
-//! `wkt_crs_name_toks` / `wkt_ellipsoid_params_toks`). Geosetta keeps its own
-//! copy regardless — `wkt_authority_code` and `is_crs_wkt` both need it — and
+//! `wkt_crs_name_toks` / `wkt_ellipsoid_params_toks` / `wkt_authority_code`).
+//! Geosetta keeps its own copy regardless — `wkt_authority_code` and `is_crs_wkt` both need it — and
 //! factoring the lexer into a shared crate would reintroduce exactly the
 //! dependency geosetta removed in its 0.24.0. Two copies of a shallow,
 //! spec-stable lexer is the same maintenance fact already accepted for the
@@ -93,6 +94,47 @@ pub(crate) fn crs_name(toks: &[Tok]) -> Option<&str> {
         (Some(Tok::Word(_)), Some(Tok::Open), Some(Tok::Str(name))) => Some(name),
         _ => None,
     }
+}
+
+/// The CRS's own `AUTHORITY`/`ID` node as `(authority, code)`, if it states one.
+///
+/// A WKT nests ids at several depths — the datum, the ellipsoid, the prime
+/// meridian, and the unit all commonly carry their own — and only the outermost
+/// one identifies the *CRS*. So this takes the **shallowest** id in the
+/// document, resolving ties to the later of them, which is where a root-level
+/// `AUTHORITY` sits relative to anything nested.
+///
+/// Used by [`identify`](crate::identify) for the inline-id path: a stated id is
+/// stronger evidence than a name (`plans/projjson-identify.org` § DECISIONS,
+/// option (a)). An id-less Esri `.prj` — the case that module exists for — has
+/// no such node anywhere and yields `None`, falling through to name recovery.
+pub(crate) fn authority_code(toks: &[Tok]) -> Option<(&str, &str)> {
+    let mut depth: i32 = 0;
+    // (depth, authority, code) of the shallowest id seen; ties resolve to the
+    // later one, so `<=` replaces on equal depth.
+    let mut best: Option<(i32, &str, &str)> = None;
+    for i in 0..toks.len() {
+        match &toks[i] {
+            Tok::Open => depth += 1,
+            Tok::Close => depth -= 1,
+            Tok::Word(w) if w.eq_ignore_ascii_case("AUTHORITY") || w.eq_ignore_ascii_case("ID") => {
+                // The keyword sits at the current depth; its node is
+                // `Open Str(authority) Comma <code> ...`.
+                let (Some(Tok::Open), Some(Tok::Str(authority)), Some(Tok::Comma)) =
+                    (toks.get(i + 1), toks.get(i + 2), toks.get(i + 3))
+                else {
+                    continue;
+                };
+                // WKT1 quotes the code (`"7844"`); WKT2 leaves it bare.
+                let Some(Tok::Str(code) | Tok::Word(code)) = toks.get(i + 4) else { continue };
+                if best.is_none_or(|(bd, _, _)| depth <= bd) {
+                    best = Some((depth, authority, code));
+                }
+            }
+            _ => {}
+        }
+    }
+    best.map(|(_, a, c)| (a, c))
 }
 
 /// The CRS's ellipsoid as `(semi_major_axis, inverse_flattening)`, from its

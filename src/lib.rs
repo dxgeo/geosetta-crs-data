@@ -4,11 +4,15 @@
 //! `proj.db`, plus a name → (authority, code) index. Decompression (zstd) and
 //! `GCR1` lookup live *here* (R6, see `plans/public-api.org`), behind [`resolve`],
 //! [`resolve_by_name`], and [`all`] — nothing outside this crate needs to parse
-//! the wire format directly. [`identify_from_wkt`] sits one level up: it
-//! recovers a CRS from an *id-less* WKT by name, validated against that WKT's
-//! own ellipsoid, and reports ambiguity rather than picking
-//! (`plans/wkt-identify.org`). `geosetta` was this crate's only consumer when it
-//! owned decoding itself; a second one ([nazca](https://github.com/dxgeo/nazca))
+//! the wire format directly. [`identify`] sits one level up: it recovers a CRS
+//! from a definition that states no code, by name, validated against that
+//! definition's own ellipsoid, and reports ambiguity rather than picking
+//! (`plans/wkt-identify.org`). It reads either dialect —
+//! [`identify_from_wkt`] and [`identify_from_projjson`] are the entry points
+//! for a caller that already knows which it has, and [`identify`] sniffs, uses
+//! an inline `id` when the definition states one, and says which evidence it
+//! used ([`Evidence`], `plans/projjson-identify.org`). `geosetta` was this
+//! crate's only consumer when it owned decoding itself; a second one ([nazca](https://github.com/dxgeo/nazca))
 //! is why that moved here instead.
 //!
 //! The embedded data is governed by the terms in `NOTICE` (PROJ, EPSG/IOGP, Esri,
@@ -33,7 +37,7 @@ mod zstd;
 pub(crate) use generated::{REGISTRY_BLOB_RAW_SIZE, REGISTRY_BLOB_ZSTD};
 pub(crate) use names::NAMES;
 
-pub use identify::{identify_from_wkt, Identity};
+pub use identify::{identify, identify_from_projjson, identify_from_wkt, Evidence, Identity};
 
 /// A resolved CRS definition, in every authoritative form the registry
 /// stores for it. `wkt`/`wkt2` are `None` where PROJ can't express the CRS

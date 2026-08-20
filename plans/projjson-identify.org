@@ -1,0 +1,407 @@
+#+TITLE: Plan: Identify an Id-less PROJJSON
+#+AUTHOR: Daniel Okuniewicz Jr.
+#+DATE: {{{time(%Y-%m-%d)}}}
+
+* Identify an Id-less PROJJSON
+
+** STATUS -- IMPLEMENTED 2026-08-19
+Extends [[file:wkt-identify.org][wkt-identify.org]] to the other definition
+dialect: =identify_from_projjson=, an input-sniffing =identify=, and =--identify=
+accepting either form. Same three-step method, same trust policy, same ambiguity
+contract -- only the extraction step is new.
+
+Companion plan on the other side of the boundary:
+=geosetta/plans/crs-definition-output.org= (=--print-crs=), which is what will
+actually produce the id-less PROJJSON this reads. Neither plan is useful alone
+for the GeoParquet case.
+
+** WHY
+[[file:wkt-identify.org][wkt-identify.org]] closed the id-less gap for Shapefile
+=.prj=, and closed it completely: a =.prj= is loose WKT text on disk, so
+=--identify= opens it directly and geosetta needed zero changes.
+
+Every other format keeps its CRS *inside* a container, and GeoParquet -- the
+format most likely to be on the other end of this pipe -- records it as
+*PROJJSON*, not WKT (=geosetta/src/parquet/geo.rs='s =parse_crs=). So even once
+geosetta can emit that definition as text, =--identify= cannot read it:
+=identify_from_wkt= is the only entry point, and =src/wkt.rs= extracts by walking
+WKT keywords.
+
+Two symptoms today, both worth fixing here:
+
+1. *The dialect gap.* An id-less PROJJSON on stdin is refused as unidentifiable,
+   which is true of the WKT parser and false of the definition.
+2. *The error message.* Point =--identify= at a =.parquet= and =read_source=
+   (=src/main.rs:186=) fails in =std::fs::read_to_string= with "stream did not
+   contain valid UTF-8" -- accurate, and no help at all in telling the user that
+   this mode reads a *definition*, not a data file.
+
+** DESIGN
+*** SNIFF -- detect the dialect, do not flag it
+First non-whitespace byte ={= → PROJJSON. Anything else → WKT.
+
+*A dialect flag was rejected outright.* =--identify= already composes with
+=--wkt= / =--wkt2= / =--projjson=, and those mean *output* dialect
+([[file:wkt-identify.org][wkt-identify.org]] § CLI: an input mode, orthogonal to
+the dialect flags). Adding an input-dialect flag would put two flag families with
+the same three names and opposite meanings on one command line. That is a real
+footgun, and it buys nothing: the sniff is unambiguous, since no WKT production
+begins with ={=.
+
+The sniff must never *silently* misread. JSON that parses but is not a CRS
+(no =type=, no name, no ellipsoid) is =Identity::Unidentified= -- it must not
+fall back to trying the WKT parser on it, which would turn a clear "this is not a
+CRS" into a confusing WKT tokenizer complaint.
+
+*** Library surface
+- =identify_from_projjson(text: &str) -> Identity= -- the new sibling.
+- =identify(text: &str) -> Identity= -- sniffs and dispatches. The CLI calls
+  this; so should any consumer piping definitions of unknown dialect.
+- =identify_from_wkt= is *unchanged*. It is published API as of 0.4.0 and there
+  is nothing to gain from breaking it; a caller who knows the dialect should
+  still be able to say so in the type system rather than through a sniff.
+
+*** Extraction -- the only genuinely new code
+Steps 2 (name lookup) and 3 (type + ellipsoid validation) are untouched. Step 1
+grows a PROJJSON path, and it is smaller than it looks: =src/identify.rs= step 3
+*already* reads =type= and the ellipsoid out of candidate PROJJSON to validate
+against the WKT. The same walk, pointed at the input instead of the candidate,
+is most of this milestone. Factor it so both sides share one implementation
+rather than growing a second.
+
+*Stale trust-boundary comment.* =json.rs='s module doc currently claims "the
+only input this ever sees is the crate's own embedded payload" -- true today,
+since =identify.rs= step 3 only ever points it at the registry's own generated
+PROJJSON. Once this walk is reused for =identify_from_projjson=, that stops
+being true: the parser now also sees whatever text arrives via =--identify=,
+which is attacker-controlled (a file, stdin, or the far end of a pipe).
+Functionally this is fine as-is -- =MAX_DEPTH = 64= (=json.rs:25=) already
+declines rather than recurses on a pathological document, so the untrusted-input
+case is already handled by the existing depth cap, not by anything this plan
+needs to add. But the comment itself becomes an inaccurate trust-boundary claim
+and should be corrected in the same commit that wires =identify_from_projjson=
+in, so a future reader doesn't lean on "trusted input only" as a reason to skip
+scrutiny here.
+
+Verified against the embedded corpus, the fields are:
+
+| what      | where                                                              |
+|-----------+--------------------------------------------------------------------|
+| name      | root =name=                                                        |
+| type      | root =type= (=GeographicCRS=, =ProjectedCRS=, ...)                 |
+| ellipsoid | =datum.ellipsoid= *or* =datum_ensemble.ellipsoid=                  |
+| (projected) | the same two, one level down under =base_crs=                    |
+
+Three notes, each confirmed against real embedded definitions rather than
+assumed from the spec:
+
+- *=datum_ensemble= is not an edge case.* =EPSG:4326= uses it, not =datum= --
+  every WGS 84-based CRS in the registry does. An extractor that only looks at
+  =datum= would miss the single most common input in existence.
+- *=ProjectedCRS= nests under =base_crs=*, whose own datum is where the ellipsoid
+  lives. This mirrors exactly what =src/wkt.rs= already does for =BASEGEOGCRS=,
+  and it inherits the same deliberate limit: *base ellipsoid only, never
+  projection method or parameters* ([[file:wkt-identify.org][wkt-identify.org]]
+  § Contracts -- building a method/parameter crosswalk is what sank the earlier
+  structural-translation attempt).
+- *The type check gets easier, not harder.* Against WKT it compares a root
+  keyword to a candidate's PROJJSON =type=; here both sides are the same
+  vocabulary, so it is string equality.
+
+=semi_minor_axis= → =inverse_flattening= conversion is already implemented for
+the WKT path (the NAD27 unit case) and applies unchanged.
+
+*** The error message for binary input
+In =read_source=, map an =io::ErrorKind::InvalidData= to something that names the
+actual mistake:
+
+#+begin_example
+"parcels.parquet": not text -- --identify reads a CRS definition (WKT or
+PROJJSON), not a data file. To identify the CRS inside a data file, have the
+tool that reads that format print its definition first.
+#+end_example
+
+Deliberately does *not* name =geosetta= or any other tool -- the crate's
+tool-agnosticism cuts both ways, and this crate has no business asserting what
+the user's reader is.
+
+** DECISIONS
+*** =--identify= uses an inline =id= when the input carries one (2026-08-18)
+Settled as option (a) of the three that were on the table: (a) use the id --
+strictly stronger evidence; (b) ignore it and always name-match, deliberately
+using worse evidence; (c) error and point at the trusted-id form, putting the
+conditional back in the user's shell.
+
+The decisive argument is the one the pipeline forces: *a user piping a file's
+CRS does not know in advance whether it has an id.* Options (b) and (c) both
+make the caller answer a question the tool can answer itself -- (c) explicitly,
+(b) by silently doing worse work. (a) collapses
+=geosetta/plans/crs-definition-output.org= § Failure mode's two-branch shell
+fallback into one unconditional pipe, which is the single highest-leverage
+consequence in either plan.
+
+The cost raised against (a) was that =--identify='s output would no longer be
+uniformly "weaker evidence," which the mode's docs and this crate's § BOUNDARY
+argument both leaned on. On inspection that framing was already imprecise: the
+mode's contract is about the *input* being possibly-id-less, and step 3 already
+validates every name-matched candidate against its own ellipsoid before
+emitting. The guarantee =--identify= makes is *validated*, not *weak*. Restate
+the mode as "identify by the strongest evidence the definition carries" and
+nothing else in the design has to move.
+
+*Provenance must be reported, not just used.* Because a caller can no longer
+infer from the mode alone which kind of evidence produced the answer,
+=--identify= says so on stderr -- one line naming whether the result came from
+a trusted inline id or from a name match validated against the ellipsoid.
+stdout is unchanged (the canonical definition, or nothing), so this costs the
+pipeline nothing and preserves the § BOUNDARY distinction for anyone who cares
+to check it.
+
+*** No size cap on =read_source= (2026-08-18)
+=stdout-security.org= finding 3 asked whether =read_source= should cap input
+size, since both it and geosetta's =--print-crs= read a whole definition into
+memory with only a depth guard (=json.rs='s =MAX_DEPTH = 64=) against
+adversarial *nesting*, nothing against adversarial *size*.
+
+Decision: no cap. OS/=ulimit= is the boundary. Three reasons:
+1. *A cap here would be inconsistent to the point of being misleading.*
+   =read_source= handles the smallest input either tool ever reads -- a single
+   CRS definition. Geosetta already slurps whole containers across all eight
+   format spokes with no cap. Guarding the CRS path alone would advertise a
+   protection the surrounding tools do not have.
+2. *A pipe has no length to check cheaply.* =--identify= reads from stdin as a
+   first-class input. Enforcing a cap there means truncating mid-stream or
+   erroring on byte N, and a legitimately large valid document is
+   indistinguishable from a hostile one without doing the parse the cap was
+   meant to avoid.
+3. *The failure mode is a local OOM-kill*, not corruption, mis-identification,
+   or execution -- availability, on the user's own machine, against an input
+   the user chose to point the tool at. That is the same tradeoff =jq='s
+   default mode makes (=stdout-security.org= § PRIOR ART), with =--stream= as
+   the opt-in escape hatch and no self-imposed limit.
+
+Revisit only if a concrete abuse case appears; "unbounded read" on its own is
+not one.
+
+*** Trust policy is unchanged, and that is the point
+Nothing here weakens [[file:wkt-identify.org][wkt-identify.org]]'s bargain. A
+name is still weaker evidence than an inline id; the ellipsoid check still
+rejects a lying name within =SNAP_TOLERANCE=; more than one validating candidate
+is still =Identity::Ambiguous= carrying all of them, still exit =2= with nothing
+on stdout, still never a pick. A second input dialect does not change what the
+evidence is worth -- it changes what the evidence can be written in.
+
+*** No new dependency
+=src/json.rs= already parses PROJJSON for step 3. This plan adds no crate
+dependency and no data; the registry blob is untouched.
+
+** CONTRACTS
+- *Exit status is unchanged*: definition on stdout and =0=; nothing on stdout and
+  =2= when ambiguous; nothing on stdout and =1= when unidentifiable. Geosetta's
+  hard error on an empty =--crs= still turns the =2= into a loud pipeline
+  failure.
+- *The sniff is total*: every input takes exactly one path, and a non-CRS JSON
+  document is =Unidentified= rather than retried as WKT.
+- *Dialect flags stay orthogonal*: input dialect is detected, output dialect is
+  chosen, and the two never share a name.
+- *Output is the registry's own definition*, never the input echoed back. Same as
+  the WKT path -- name recovery identifies a candidate, then emits the
+  authoritative record (correct axis order by construction).
+
+** MILESTONES
+All five landed 2026-08-19.
+
+1. *Done*: extraction + =identify_from_projjson=, with steps 2--3 factored into
+   =identify_by_name= so both dialects share one implementation. =json.rs='s
+   trust-boundary comment corrected in the same change.
+2. *Done*: =identify= + CLI wiring -- the sniff, and the non-CRS-JSON case.
+3. *Done*: the inline-id path and its provenance line. Needed a new
+   =wkt::authority_code= (shallowest id wins), as predicted. See § THE
+   =identify= SIGNATURE below for the one place this contradicted § Library
+   surface.
+4. *Done*: the strip-id bulk oracle. See § RESULTS.
+5. *Done*: the =read_source= error message.
+
+*** THE =identify= SIGNATURE
+§ Library surface specifies =identify(text) -> Identity=. That was written
+before § DECISIONS settled option (a), which requires reporting *which*
+evidence produced the answer -- and a bare =Identity= cannot carry that. The
+implemented signature is =identify(text) -> (Identity, Evidence)=, with a new
+public =Evidence= enum. =identify_from_wkt= and =identify_from_projjson= both
+keep the plain =-> Identity= shape the plan specifies, so the published 0.4.0
+surface is unchanged and only the *new* entry point carries the tuple.
+
+=Evidence::InlineId= implies =Identity::Unique=: a stated id either resolves to
+exactly one record or it is not evidence at all, in which case the name path
+runs and reports itself. So an ambiguous or unidentified answer is always
+=ValidatedName=.
+
+** TESTING
+*** The strip-id oracle -- this crate can test itself
+The registry embeds PROJJSON for all 13,790 CRSes and =--projjson= is documented
+as "the one dialect every entry has". Strip the root =id= from each and you have
+a *perfect id-less corpus of every CRS that exists*, with known-correct answers,
+requiring no fixtures and no external tool. Nothing comparable was available to
+[[file:wkt-identify.org][wkt-identify.org]], which had to import 2,705 real Esri
+rows from geosetta.
+
+So: for every embedded record, strip the root =id=, run =identify_from_projjson=,
+and require the record's own =(authority, code)= to be *in the candidate set*.
+
+- *Strip the root =id= only.* Nested ids inside =datum_ensemble.members= are part
+  of the datum's description, not the CRS's identity, and real id-less PROJJSON
+  in the wild would keep them. Stripping them too would test a shape no writer
+  emits.
+- *The strip must be structural, not positional (measured 2026-08-19).* The
+  obvious implementation -- chop a trailing =,"id":{...}}= -- is wrong for *966
+  of the 13,790* records, which carry a =remarks= string *after* the root =id=
+  (=EPSG:10158=, =10175=, =10176=, ...). Every record does have a root =id=
+  (zero exceptions), so there is nothing to skip; the strip just cannot assume
+  where it sits. =json.rs= is read-only with no serializer, so this needs either
+  a minimal member-level splice on the source text or a writer -- decide when
+  implementing, and assert the strip actually removed something rather than
+  silently testing the un-stripped corpus.
+- *Expected coverage, from the corpus (measured 2026-08-19).* Root =type= counts:
+  =ProjectedCRS= 10,316, =GeographicCRS= 1,731, =CompoundCRS= 702,
+  =VerticalCRS= 609, =GeodeticCRS= 417, =EngineeringCRS= 15. [[file:wkt-identify.org][wkt-identify.org]]'s
+  =Kind= covers the geographic/geodetic/projected families = *12,464* records;
+  the remaining *1,326* have no =Kind= and decline by design. So the oracle's
+  denominator is 12,464, not 13,790, and the 1,326 declines are the expected
+  result rather than a gap -- state that in § RESULTS so the number is not read
+  as a failure rate.
+- *The bar is the recovery bar, not the R1 bar*: zero *wrong* answers. Declining
+  is acceptable; =Ambiguous= is acceptable as long as the true code is among the
+  candidates. This is deliberately weaker than =crs-registry.org='s R1 oracle
+  (100% identification via trusted id) for the reason that governs this whole
+  module -- name evidence is weaker than an id.
+- *Expect a lot of ambiguity, and record how much.*
+  [[file:wkt-identify.org][wkt-identify.org]] § RESULTS found first-wins was
+  wrong far more often than that plan assumed. Over the whole registry, name
+  collisions will be more common still, not less. The number is the finding;
+  publish it in a § RESULTS section like its predecessor's.
+- Unlike the Esri oracles this needs *no =projinfo= on =PATH=* and so should not
+  be =#[ignore]=-gated -- unless whole-corpus runtime forces it, in which case
+  gate on cost, not on tooling.
+
+*** Everything else
+- *Cross-dialect agreement*: for CRSes present in both corpora, the WKT and
+  PROJJSON paths must return the same =Identity=. Where they disagree, the
+  extraction differs -- that is the bug this catches.
+- *Sniffing*: leading whitespace before ={=; a WKT string containing a ={=
+  somewhere after the first token still reads as WKT; valid JSON that is not a
+  CRS is =Unidentified=, not a WKT parse error.
+- *CLI* (=tests/cli_identify.rs=): PROJJSON via file, stdin, and =-=; each output
+  dialect flag composing with PROJJSON input; =--all= listing; exit =2= on
+  ambiguity and =1= on unidentifiable, both with empty stdout.
+- *Binary input*: a real =.parquet= (or any non-UTF-8 bytes) produces the new
+  message, not the raw =std= one.
+- *The end-to-end pipe*, once =--print-crs= exists on the geosetta side: id-less
+  GeoParquet → =--print-crs= → =--identify --projjson= → =--crs -=. Gated on both
+  real binaries, as [[file:wkt-identify.org][wkt-identify.org]]'s equivalent was.
+
+** RESULTS (2026-08-19)
+*** The strip-id oracle over all 13,790 embedded CRSes
+Runs in ~1.5 s, needs no external tool, and is therefore not =#[ignore]=-gated.
+
+| outcome                            | records |
+|------------------------------------+---------|
+| uniquely recovered                 |  10,410 |
+| ambiguous, true code among them    |   2,054 |
+| declined                           |   1,326 |
+| *wrong*                            |   *0*   |
+
+*Zero wrong answers*, which was the bar. And the declines are *exactly* the
+1,326 records in families =Kind= does not cover -- =CompoundCRS= 702,
+=VerticalCRS= 609, =EngineeringCRS= 15 -- so within the 12,464 covered records
+the recovery rate is *100%*. Nothing in the covered families declines.
+
+Ambiguity is real but small and shallow: 1,959 records have 2 candidates, 75
+have 3, 20 have 4, and none more. [[file:wkt-identify.org][wkt-identify.org]]
+§ RESULTS expected "name collisions will be more common still, not less" over
+the whole registry; that held in count (2,054 vs. its 999) but not in *degree* --
+no name in the registry is shared by more than four CRSes of the same family and
+ellipsoid.
+
+*** Two extraction gaps the oracle found, and one soundness bug it did not
+The oracle's first run declined *3,421*, of which 2,095 were in covered families
+-- i.e. real failures, not by-design declines. Two causes, both in the shared
+ellipsoid extractor and therefore *pre-existing in the WKT path too*:
+
+1. *Spheres.* The two dialects state "no flattening" differently: WKT writes an
+   inverse flattening of =0= (=SPHEROID["Sphere_EMEP",6370000.0,0.0]=), PROJJSON
+   omits flattening and states a =radius=. Neither is literally an inverse
+   flattening of zero. Both now canonicalize to =INFINITY= (=canonical_rf=), the
+   true inverse of zero flattening, so an Esri sphere validates against the
+   registry's.
+2. *Non-metre ellipsoids.* Clarke 1858, Everest 1830, and Clarke 1880 are defined
+   in Clarke's or Indian feet, and PROJJSON wraps the axis as
+   ={"value": N, "unit": {... "conversion_factor": F}}=. Reading =value= while
+   ignoring =unit= would compare feet against metres; the extractor now
+   normalizes through the factor, and *declines* rather than assuming metres when
+   a =unit= object carries no factor.
+
+Fixing both took the declines to 1,326 -- the by-design floor.
+
+*The soundness bug is worth recording separately*, because it was introduced by
+the sphere fix and caught only by an assertion written alongside it, not by the
+oracle. =approx_eq='s tolerance scales with its operands, so
+=SNAP_TOLERANCE * INFINITY= is =INFINITY= and =(inf - 298.25).abs() <= inf= is
+*true*: a sphere validated against every ellipsoid. The oracle passed anyway,
+because sphere-named CRSes only ever name-match sphere candidates -- a bulk
+oracle over real data cannot see a hole nothing in the data falls into.
+=approx_eq= now rejects non-finite mismatches explicitly. The lesson is the one
+[[file:wkt-identify.org][wkt-identify.org]] § BOUNDARY already implies: the
+corpus tests what the data does, and unit tests test what the code permits.
+
+*** The Esri WKT corpus, revised
+The same fixes moved [[file:wkt-identify.org][wkt-identify.org]]'s census
+(=tests/identify_esri.rs=), since the extractor is shared:
+
+| corpus                      | was                | now             |
+|-----------------------------+--------------------+-----------------|
+| =esri_geographic_wkt1.tsv=  | (218, 109, *104*)  | (321, 110, *0*) |
+| =esri_projected_wkt1.tsv=   | (1306, 890, *78*)  | (1383, 891, *0*)|
+
+/(unique, ambiguous, unidentified)./ Every one of the 2,705 real Esri rows now
+identifies. The 182 that geosetta 0.23's rule declined and this crate now
+answers are recorded as a number in
+=matches_the_geosetta_rule_over_the_whole_corpus=, which previously asserted
+strict equivalence with that rule and so *forbade the improvement*; it now
+asserts the load-bearing direction only (nothing geosetta resolved may be lost,
+and its answer is still first in the candidate set).
+
+** OPEN QUESTIONS
+*** Closed 2026-08-19
+- *Is there a real id-less GeoParquet file? -- yes, and geosetta makes one.*
+  This was carried as "unconfirmed, and likely to stay that way" on the
+  reasoning that PROJ/GDAL/=projinfo= always emit a root =id=. That reasoning
+  was about *those* writers and quietly assumed they were the only ones.
+
+  Converting an Esri Shapefile to GeoParquet with geosetta produces the file
+  directly. An Esri =.prj= carries no =AUTHORITY= node, so there is no id for
+  =Crs::from_authority_code= to lift, and =crs/wkt_projjson.rs='s crosswalk
+  emits PROJJSON without one -- root keys =type=, =name=, =datum=,
+  =coordinate_system=, name =GCS_WGS_1984=, no =id=. Confirmed against
+  =geosetta/tests/fixtures/duckdb_crs_pt.shp=: =--print-crs-code= on the
+  resulting =.parquet= correctly reports nothing and exits 1, while
+  =--print-crs= emits the id-less definition this plan exists to read.
+
+  So the input is neither hypothetical nor something to go hunting for in the
+  wild: the workspace's own converter emits it from the most common id-less
+  input there is. The end-to-end test in
+  =geosetta/plans/crs-definition-output.org= § TESTING can be built from a
+  Shapefile with no hand-rolled fixture, and the "wild-input assumption is
+  unvalidated" caveat narrows to formats other than GeoParquet.
+
+*** Settled
+- No size cap on =read_source= -- OS/=ulimit= is the boundary (§ DECISIONS,
+  2026-08-18; closes =stdout-security.org= finding 3).
+- =--identify= uses an inline =id= when present -- option (a) -- and reports
+  on stderr which evidence it used (§ DECISIONS, 2026-08-18).
+- A real id-less GeoParquet file exists and geosetta produces it from an Esri
+  Shapefile (§ Closed 2026-08-19); this supersedes the 2026-08-18 downgrade to
+  an unvalidated caveat.
+- Sniff, never a flag (§ SNIFF).
+- =identify_from_wkt= stays as published (§ Library surface).
+- Base ellipsoid only for projected CRSes -- inherited unchanged from
+  [[file:wkt-identify.org][wkt-identify.org]] § Contracts.

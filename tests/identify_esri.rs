@@ -130,19 +130,33 @@ fn scrape_number(json: &str, key: &str) -> Option<f64> {
 #[test]
 fn matches_the_geosetta_rule_over_the_whole_corpus() {
     let mut disagreements = Vec::new();
+    let mut newly_identified = 0usize;
     for (code, wkt) in all_fixtures() {
         let got = geoscribe::identify_from_wkt(&wkt);
         let mine = ids(&got);
         let theirs = geosetta_0_23_pick(&wkt);
-        // Same predicate: geosetta identified something exactly when at least
-        // one candidate validates here...
-        if theirs.is_some() == mine.is_empty() {
-            disagreements.push(format!("ESRI:{code}: geosetta {theirs:?}, here {mine:?}"));
+
+        // The load-bearing direction: nothing geosetta could resolve may be
+        // lost. A decline here where it answered is a regression.
+        if theirs.is_some() && mine.is_empty() {
+            disagreements.push(format!("ESRI:{code}: geosetta {theirs:?}, here declined"));
             continue;
         }
-        // ...and the answer it returned is always the first of ours, since
+        // The other direction is an *improvement*, not a disagreement, and this
+        // test used to forbid it by asserting strict equivalence. Geosetta's
+        // rule reimplemented below (`geosetta_0_23_pick`) inherits the same
+        // sphere and non-metre-axis blind spots this crate had until
+        // 2026-08-19 — see `the_ambiguity_rate_over_the_corpus` — so it declines
+        // on 182 fixtures that now identify. Count them; do not require them.
+        if theirs.is_none() {
+            if !mine.is_empty() {
+                newly_identified += 1;
+            }
+            continue;
+        }
+        // Where it did answer, that answer is always the first of ours, since
         // "first in NAMES order" is precisely the step this crate stops short
-        // of. Nothing geosetta could resolve was lost; ambiguity was hidden.
+        // of. Ambiguity was hidden, never a different CRS.
         if let Some(theirs) = theirs
             && mine.first() != Some(&theirs)
         {
@@ -155,6 +169,9 @@ fn matches_the_geosetta_rule_over_the_whole_corpus() {
         disagreements.len(),
         disagreements.join("\n")
     );
+    // Recorded, like the census: a drop here means the ellipsoid extractor lost
+    // ground, which no change should do silently.
+    assert_eq!(newly_identified, 182, "fixtures geosetta declined and this crate identifies");
 }
 
 #[test]
@@ -228,9 +245,33 @@ fn the_ambiguity_rate_over_the_corpus() {
     // Update these numbers deliberately when the registry is regenerated from a
     // newer `proj.db` — a change here is a real change in what the data
     // supports, worth looking at rather than absorbing.
+    //
+    // **Revised 2026-08-19, and the unidentified column is now zero.** It was
+    // (218, 109, 104) and (1306, 890, 78). The 182 declines were not a property
+    // of the data: `identify`'s shared ellipsoid extractor read
+    // `semi_major_axis` only as a bare number and required an
+    // `inverse_flattening` or `semi_minor_axis` to pair with it, so it silently
+    // declined on two real shapes in the registry —
+    //
+    //   * **spheres**, where the two dialects state the same fact differently —
+    //     WKT writes inverse flattening `0`, PROJJSON writes a `radius` and no
+    //     flattening — so an Esri sphere could never match the registry's
+    //     (the ESRI:104xxx planetary CRSes, EPSG:10346's authalic sphere).
+    //     `canonical_rf` normalizes both to `INFINITY`, the true inverse of zero
+    //     flattening, and `approx_eq` rejects non-finite mismatches so a sphere
+    //     still never validates against a real ellipsoid;
+    //   * **non-metre ellipsoids**, which wrap the axis as
+    //     `{"value": …, "unit": {… "conversion_factor": F}}` (Clarke 1858 in
+    //     Clarke's feet, Everest 1830, Clarke 1880).
+    //
+    // Both are now read (`identify.rs`'s `metres` and the `radius` arm), which
+    // is why every one of these 2 705 real Esri rows identifies. Found by the
+    // strip-id oracle in `identify_projjson_oracle.rs`, which is exactly the
+    // class of gap it was built to surface. The ambiguous column moved by one in
+    // each file, so the newly-reachable candidates are almost all unique.
     for (file, want) in [
-        ("esri_geographic_wkt1.tsv", (218, 109, 104)),
-        ("esri_projected_wkt1.tsv", (1306, 890, 78)),
+        ("esri_geographic_wkt1.tsv", (321, 110, 0)),
+        ("esri_projected_wkt1.tsv", (1383, 891, 0)),
     ] {
         let (mut unique, mut ambiguous, mut unidentified) = (0, 0, 0);
         for (_, wkt) in fixtures(file) {
@@ -332,3 +373,4 @@ fn bulk_oracle_esri_geographic() {
 fn bulk_oracle_esri_projected() {
     bulk_oracle("esri_projected_wkt1.tsv", "projected");
 }
+

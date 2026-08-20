@@ -23,31 +23,51 @@ or computed*, not copied. Two capabilities today:
   WKT (an Esri-flavor Shapefile =.prj=, which carries no =AUTHORITY= node) by
   its name, validated against that WKT's own ellipsoid —
   [[file:plans/wkt-identify.org][plans/wkt-identify.org]].
-- Dimension-aware geometry *envelope (bounding-box) computation* — scoping
-  only so far, see
-  [[file:plans/envelope-computation.org][plans/envelope-computation.org]].
-  Unlike the CRS registry this needs no embedded dataset at all — it's pure
-  arithmetic over a geometry's own coordinates — but it's the same *shape* of
-  problem (a value the consumer must derive, not one the source handed it),
-  which is why it lands here rather than in =geosetta= itself.
+Envelope (bounding-box) computation was briefly the planned second capability
+here. *It was retired on 2026-08-18 without being implemented* and moved to
+[[file:../geosetta/plans/envelope.org][geosetta/plans/envelope.org]] — see
+[[file:plans/envelope-computation.org][plans/envelope-computation.org]]
+§ STATUS. Its premise did not survive checking: =geosetta= already owns a
+public =Bbox= fold and already writes GeoParquet's =geo= bbox from it, so the
+"a value the consumer must derive, not one the source handed it" argument —
+which is what broadened this charter in the first place — was describing a
+capability the consumer already had.
 
-Originally built as just the CRS registry for Geosetta; broadened to this wider
-charter on 2026-08-17 once envelope computation showed the "isolate third-party
-data" rationale was really one instance of a bigger one: *own whatever
-geospatial metadata isn't a simple pass-through.* Kept as a standalone,
-reusable crate rather than data/logic owned by Geosetta itself.
+Originally built as just the CRS registry for Geosetta; broadened on
+2026-08-17 to *own whatever geospatial metadata isn't a simple pass-through*,
+on the strength of that envelope argument. The broadening is *not* rescinded —
+this crate is a metadata reader/writer, and =wkt-identify.org=/
+=projjson-identify.org= are real instances of it that have nothing to do with
+the CRS *table*. But the one worked example the broadening rested on turned out
+to belong elsewhere, which is worth keeping in view: "isn't a simple
+pass-through" is a test a capability can pass while still being in the wrong
+crate. Ask separately whether the consumer already has it, and whether it can
+reach this crate at all
+([[file:../architecture.org][../architecture.org]]: there are no dependency
+edges between the three crates). Kept as a standalone, reusable crate rather
+than data/logic owned by Geosetta itself.
 
 ** ARCHITECTURE
-Geoscribe is the *shared leaf* of the three-crate graph: both =geosetta= and
-=nazca= may optionally depend on it, and it depends on neither — see
-[[file:../architecture.org][../architecture.org]] for the full graph and the
-two boundary rules that govern it. Priorities, in order:
+Geoscribe is a *peer* of =geosetta= and =nazca=, not a layer beneath them.
+As of 2026-08-18 there are no dependency edges between any pair of the three
+crates, in either direction — see
+[[file:../architecture.org][../architecture.org]] § THE COMPOSITION MODEL for
+why, and for the two boundary rules that govern it. (An earlier framing called
+this crate the graph's "shared leaf" that the other two optionally depended
+on; =geosetta= dropped that dependency in its 0.24.0 and =nazca= dropped its
+planned one on 2026-08-18.)
+
+Nothing about this crate's job changes as a result — the consumers are simply
+*callers* rather than *dependents*: a program that links =geoscribe= alongside
+whatever else it needs, or a shell pipeline that runs its CLI. Priorities, in
+order:
 
 - *Own the metadata so consumers don't re-derive it.* Decoding (zstd) and
   lookup are owned *here* (=resolve=/=resolve_by_name=/=all=), not shipped as
   a raw blob each consumer must decode itself. =geosetta='s own copy of that
   logic was deleted when it switched to calling through
-  ([[file:plans/public-api.org][plans/public-api.org]]).
+  ([[file:plans/public-api.org][plans/public-api.org]]); =nazca= never grew
+  one, because with no edge it never sees the blob at all.
 - *Text at the boundary.* =resolve()= returns a =CrsRecord= of *strings*
   (PROJJSON, WKT, WKT2), not a parsed Rust struct — consumers parse into their
   own representation on their own side. These are external, spec-defined
@@ -72,41 +92,52 @@ two boundary rules that govern it. Priorities, in order:
   oracle: every embedded definition must round-trip at =projinfo --identify=.
 
 ** STATUS
-*Built, not yet published under this name.* =v0.2.0= shipped on crates.io under
-this crate's original name, =geosetta-crs-data=
-([[https://crates.io/crates/geosetta-crs-data][crates.io]]). The crate has since
-been renamed to =geoscribe= ([[https://github.com/dxgeo/geoscribe][GitHub]]) —
-GitHub rename done. Publishing =v0.4.0= (R6's public API plus
-=identify_from_wkt=) under =geoscribe= is next; once live, every =geosetta-crs-data= version gets yanked
-to point dependents at the new name.
+*Published under this name.* The crate began life as =geosetta-crs-data= and
+was renamed to =geoscribe= ([[https://github.com/dxgeo/geoscribe][GitHub]]); the
+rename is complete on both ends — releases go out under the new name on
+[[https://crates.io/crates/geoscribe][crates.io]], and every
+=geosetta-crs-data= version is yanked, pointing dependents here.
 
 The CRS registry is *done* (=crs-registry.org= R1–R5, =public-api.org= R6a–R6d),
-as is id-less WKT identification (=wkt-identify.org=); envelope computation is
-*scoping only*. See
+as is id-less identification in *both* dialects (=wkt-identify.org=, and
+=projjson-identify.org= as of 2026-08-19 — which also closed the cross-repo item
+with =geosetta='s =--print-crs=). Envelope computation was retired out of this
+crate on 2026-08-18 without being implemented. Nothing is open. See
 [[file:plans/README.org][plans/README.org]] for the plan index and
 [[file:plans/todo.org][plans/todo.org]] for what's open right now. A session
 picking up the CRS work should start at [[file:handoff.org][handoff.org]].
 
 ** IMPLEMENTATION
 - =src/lib.rs= :: the public surface — =resolve=, =resolve_by_name=, =all=,
-  =CrsRecord=, =CRS_COUNT=, =DATASET_VERSIONS=.
+  =identify=, =identify_from_wkt=, =identify_from_projjson=, =CrsRecord=,
+  =Identity=, =Evidence=, =CRS_COUNT=, =DATASET_VERSIONS=.
 - =src/registry.rs= :: =GCR1= decode + lookup internals (binary search over a
   sorted fixed-width index; decode-once behind a =OnceLock=).
 - =src/zstd.rs= :: this crate's own zstd decoder (RFC 8878, from scratch).
-- =src/identify.rs= :: =identify_from_wkt= — name lookup validated against the
-  WKT's own ellipsoid, returning =Identity::{Unique, Ambiguous, Unidentified}=.
-  The trust policy that sits *on top of* =resolve_by_name=, and the one place
-  in this crate that weighs evidence rather than reporting it
-  ([[file:plans/wkt-identify.org][plans/wkt-identify.org]]).
+- =src/identify.rs= :: name lookup validated against the input's own ellipsoid,
+  returning =Identity::{Unique, Ambiguous, Unidentified}=. The trust policy that
+  sits *on top of* =resolve_by_name=, and the one place in this crate that
+  weighs evidence rather than reporting it
+  ([[file:plans/wkt-identify.org][plans/wkt-identify.org]],
+  [[file:plans/projjson-identify.org][plans/projjson-identify.org]]).
+  =identify_from_wkt= and =identify_from_projjson= differ only in extraction —
+  steps 2 and 3 are one shared implementation — and =identify= sniffs the
+  dialect, prefers an inline id when the definition states one, and reports
+  which =Evidence= produced the answer.
 - =src/wkt.rs=, =src/json.rs= :: a shallow WKT lexer and a minimal read-only
   JSON reader, both feeding =identify.rs= only. Ported rather than shared —
   same reasoning as the zstd decoder; see each module's header.
 - =src/main.rs= :: the =geoscribe= CLI — the trusted-id lookup, plus
-  =--identify= for id-less WKT. Still never exposes the raw, unvalidated
-  =resolve_by_name=.
+  =--identify= for a definition in either dialect (sniffed, never flagged, so it
+  cannot collide with the =--wkt=/=--wkt2=/=--projjson= *output* flags). Reports
+  its evidence on one line of stderr, leaving stdout to the definition alone.
+  Still never exposes the raw, unvalidated =resolve_by_name=.
 - =tests/= :: the Esri corpus (431 geographic + 2,274 projected real
-  =WKT1_ESRI= exports) behind =identify_esri.rs=, and the CLI's stdout/stderr/
-  exit-status contracts behind =cli_identify.rs=.
+  =WKT1_ESRI= exports) behind =identify_esri.rs=; the CLI's stdout/stderr/
+  exit-status contracts behind =cli_identify.rs=; and =identify_projjson_oracle.rs=,
+  which strips the root =id= from all 13,790 embedded definitions and feeds each
+  back in — a complete id-less corpus with known answers, needing no fixtures and
+  no =projinfo=.
 - =src/generated.rs=, =src/names.rs=, =src/registry.bin.zst= :: generated —
   the =GCR1= v2 blob (1.07 MB compressed, 13,790 CRSes), the name →
   =(authority, code)= index (20,760 entries), and the stamped sizes/versions.
@@ -148,14 +179,30 @@ ogr2ogr -a_srs $(geoscribe EPSG:4326) ...
 Exit =1= with a message on stderr for an unknown code or a requested dialect
 the CRS doesn't have.
 
-=--identify= covers what an authority code can't: an id-less WKT, read from a
-file or stdin. It is the same output contract — the definition alone on stdout
-— so it drops straight into a pipeline:
+=--identify= covers what an authority code can't: a definition that states no
+code, read from a file or stdin, in *either dialect* — WKT or PROJJSON, sniffed
+on the first non-whitespace byte rather than flagged, since =--wkt=/=--wkt2=/
+=--projjson= already mean the *output* dialect. It is the same output contract —
+the definition alone on stdout — so it drops straight into a pipeline:
 
 #+begin_src sh
 geoscribe --identify --projjson parcels.prj \
   | geosetta parcels.shp parcels.parquet --crs -
 #+end_src
+
+The PROJJSON half is what reaches a CRS buried in a container, which is every
+format but a Shapefile =.prj=. Paired with =geosetta --print-crs=, one
+unconditional command covers it:
+
+#+begin_src sh
+geosetta parcels.parquet --print-crs \
+  | geoscribe --identify --projjson \
+  | geosetta parcels.parquet parcels.fgb --crs -
+#+end_src
+
+*Unconditional* because =--identify= prefers an inline =id= when the definition
+states one, so the caller never has to know whether it does; which evidence was
+used is reported on one line of stderr, leaving stdout untouched.
 
 This is *weaker evidence* than a stated code (a name plus an ellipsoid), so it
 declines rather than guessing, and where several real CRSes fit equally well it
@@ -178,30 +225,44 @@ override, so an ambiguous or failed identification fails the pipeline loudly
 instead of quietly writing a mislabeled file.
 
 ** ROADMAP
-- *Publish =v0.4.0= under the =geoscribe= name*, then yank the old
-  =geosetta-crs-data= versions. The nearest-term item; see
-  [[file:plans/todo.org][plans/todo.org]].
 - [[file:plans/public-api.org][plans/public-api.org]] *R6e* — the acceptance
-  test: a consumer with no =geosetta= dependency (=nazca=) resolving a real
-  code through this crate alone. Open.
+  test: a consumer with no =geosetta= dependency resolving a real code through
+  this crate alone. Open. The vehicle is now a throwaway smoke-test crate (or
+  a =dev-dependency= test on =nazca='s side), since =nazca= no longer carries
+  a path-dep on this crate to exercise.
 - *Ambiguity is common enough to be worth revisiting* — over the Esri corpus,
-  109 of 431 geographic and 890 of 2,274 projected =.prj= exports match more
+  110 of 431 geographic and 891 of 2,274 projected =.prj= exports match more
   than one registry CRS equally well (typically a deprecated ESRI code beside
   its live EPSG twin). The blob carries no deprecation flag, so nothing here
   can prefer one honestly today; adding that to =GCR1= would resolve most of
   them. See [[file:plans/wkt-identify.org][plans/wkt-identify.org]] § OPEN QUESTIONS.
-- [[file:plans/envelope-computation.org][plans/envelope-computation.org]] —
-  dimension-aware bbox computation, the second capability under the broadened
-  charter. Scoping only; gated on deciding how a non-CRS capability gates into
-  =geosetta='s Cargo features.
+- ~~[[file:plans/envelope-computation.org][plans/envelope-computation.org]]~~ —
+  *retired 2026-08-18, moved out of this crate and never implemented here.* The
+  envelope fold and the GeoPackage writer gap are now
+  [[file:../geosetta/plans/envelope.org][geosetta/plans/envelope.org]];
+  transforming a bbox across CRSes is
+  [[file:../nazca/plans/transform-bounds.org][nazca/plans/transform-bounds.org]].
+  The Cargo-feature question that gated it is moot — no crate has a feature
+  gating a sibling crate any more.
 - *Registry currency* — the embedded data is only as current as the =proj.db=
   it was generated from; a newer EPSG release means regenerating *and*
   re-checking attribution ([[file:plans/crs-registry.org][plans/crs-registry.org]]
   § ATTRIBUTION). No trigger for this exists today.
 - *Charter discipline* — "own whatever geospatial metadata isn't a simple
-  pass-through" is an easy bar to satisfy sloppily. The next capability should
-  face the same scrutiny =envelope-computation.org= did (explicit alternatives,
-  explicit "why here and not in =geosetta="), not less.
+  pass-through" is an easy bar to satisfy sloppily, and envelope computation is
+  now the worked example of *how*: =envelope-computation.org= did ask "why here
+  and not in =geosetta=" explicitly, and still landed wrong, because it answered
+  from the charter rather than from the code. Two checks that plan did not run,
+  which the next capability must:
+  1. *Does the consumer already have it?* =geosetta= had a public =Bbox= fold
+     writing GeoParquet's =geo= bbox the whole time.
+  2. *Can the consumer reach this crate at all?* It cannot — there are no
+     dependency edges between the three crates
+     ([[file:../architecture.org][../architecture.org]]), so a capability
+     planned "for =geosetta='s benefit" has no delivery path by construction.
+  =nazca='s =project.org= § CHARTER is the model for what a bounded charter
+  looks like: a falsifiable test ("does this need to know *which* CRS the
+  coordinates are in?"), not a category.
 
 *Non-goals*, unchanged: reprojection / coordinate transformation (that's
 =nazca=), embedding the *transformation* dataset (Helmert/grid pipelines —

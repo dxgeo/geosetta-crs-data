@@ -9,12 +9,20 @@
 //! `Option` too — so validation reads it rather than a dialect that might not
 //! be there.
 //!
-//! **The only input this ever sees is the crate's own embedded payload**,
-//! produced by `tools/gen_crs_registry.py` from `proj.db`. It is not a
-//! general-purpose JSON facility and is not exposed: no writer, no error
-//! detail, no number/integer distinction — a malformed document yields
-//! `None` and the caller declines to identify. A depth cap keeps a
-//! pathological document from overflowing the stack even so.
+//! **This parser reads untrusted input.** It began life seeing only the crate's
+//! own embedded payload (produced by `tools/gen_crs_registry.py` from
+//! `proj.db`), and its module doc said so; that stopped being true when
+//! [`identify_from_projjson`](crate::identify_from_projjson) pointed the same
+//! walk at whatever text arrives via `--identify` — a file, stdin, or the far
+//! end of a pipe, all attacker-controlled. Nothing about the parser had to
+//! change: `MAX_DEPTH` already declines rather than recursing on a pathological
+//! document, and a malformed document has always yielded `None` for the caller
+//! to decline on. But do not read "trusted input only" into this module, because
+//! it is no longer true.
+//!
+//! It is still not a general-purpose JSON facility and is still not exposed: no
+//! writer, no error detail, no number/integer distinction. There is deliberately
+//! no size cap either — see `plans/projjson-identify.org` § DECISIONS.
 //!
 //! **Ported, not shared**, from `geosetta`'s `src/json/`, trimmed to the read
 //! path — same reasoning as [`crate::wkt`], see that module's header.

@@ -1,8 +1,8 @@
 [package]
 name = "geoscribe"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
-description = "Geospatial metadata reader/writer: an embedded, authoritative CRS registry (all 13,790 CRSes in PROJ's proj.db) — resolve (authority, code) to PROJJSON/WKT1/WKT2, or identify an id-less WKT by name validated against its own ellipsoid, reporting ambiguity rather than guessing. Zero dependencies; library + CLI. Rust code is MIT; the embedded CRS data carries third-party dataset terms — see NOTICE."
+description = "Geospatial metadata reader/writer: an embedded, authoritative CRS registry (all 13,790 CRSes in PROJ's proj.db) — resolve (authority, code) to PROJJSON/WKT1/WKT2, or identify an id-less WKT or PROJJSON by name validated against its own ellipsoid, reporting ambiguity rather than guessing. Zero dependencies; library + CLI. Rust code is MIT; the embedded CRS data carries third-party dataset terms — see NOTICE."
 license = "MIT"
 
 # Decoding (zstd) and lookup live here (R6, see plans/public-api.org), behind a

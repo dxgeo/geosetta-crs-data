@@ -268,6 +268,15 @@ Over the two real Esri corpora, per =the_ambiguity_rate_over_the_corpus=:
 | geographic |      431 |    218 |          109 |          104 |
 | projected  |    2 274 |  1 306 |          890 |           78 |
 
+*Superseded as current numbers, 2026-08-19.* The table is the 2026-08-17
+measurement and stays as recorded, because the argument below is argued from
+it. The extractor has since learned two shapes it had been silently declining
+on -- spheres and non-metre axes -- taking these corpora to (321, 110, *0*) and
+(1383, 891, *0*): *no* fixture is unidentified any more, and the ambiguity
+counts barely moved. Read the =unidentified= column as history and the
+=ambiguous= one as still substantially true. See
+[[file:projjson-identify.org][projjson-identify.org]] § RESULTS.
+
 Geosetta answered on unique *and* ambiguous alike -- 327 of 431 and 2 196 of
 2 274. So *one in three* of its projected answers, and one in three of its
 geographic ones, was a sort order standing in for evidence. That is the number
@@ -329,16 +338,21 @@ All of the below is built; § RESULTS has the numbers.
 ** OPEN QUESTIONS
 *** Open
 - *Should =GCR1= carry a =deprecated= flag?* By far the highest-value follow-up:
-  it would collapse most of the 999 ambiguous fixtures in § RESULTS to a single
+  it would collapse most of the 1 001 ambiguous fixtures (110 + 891 post-2026-08-19;
+  § RESULTS records the pre-fix 999) to a single
   live answer, on real evidence rather than a tie-break. =proj.db= has the
   column; the blob does not, and adding it is a format change (v3) plus a
   regeneration. Note the policy question underneath it -- preferring a live CRS
   over a deprecated one is a judgment, and § BOUNDARY's ghost applies: it
   belongs in =identify.rs= (which already weighs evidence), not in =resolve=.
-- *Should a =--identify= match report its evidence* (matched name, ellipsoid
-  deltas) on stderr, so a human can sanity-check what was snapped to without
-  =--all=? Deferred, not rejected -- worth revisiting if anyone reports being
-  surprised by a =Unique= answer.
+- *Should a =--identify= match report its evidence* on stderr, so a human can
+  sanity-check what was snapped to without =--all=? *Half-answered 2026-08-19*
+  by [[file:projjson-identify.org][projjson-identify.org]]: =main.rs= now
+  prints which *path* produced the answer (trusted inline id vs. name validated
+  against the ellipsoid) on every =Unique=. What this question asked for and
+  did not get is the *substance* -- the matched name and the ellipsoid deltas.
+  Still deferred, not rejected, and on the same trigger: worth revisiting if
+  anyone reports being surprised by a =Unique= answer.
 - *Does the ellipsoid-only bar hold as =proj.db= grows?* Unchanged from
   § DESIGN: if a bulk oracle ever finds a *wrong* (not merely declined)
   resolution, add a real projection method/parameter check then, not before.

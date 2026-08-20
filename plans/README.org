@@ -3,7 +3,7 @@
 
 * Plans
 Design notes, one self-contained plan per file, ordered by dependency. Most are
-implemented — each entry says so; the one marked /scoping only/ is not.
+implemented — each entry says so; those marked /scoping only/ are not.
 
 Orientation for a session picking up the CRS work starts one level up, at
 [[file:../handoff.org][handoff.org]], not here.
@@ -39,14 +39,41 @@ Orientation for a session picking up the CRS work starts one level up, at
   pipeable =--identify= CLI mode. Restores the capability lost when =geosetta=
   removed its =crs-registry= feature and this dependency in 0.24.0; geosetta
   needs no changes, since its =--crs= flag already accepts arbitrary
-  WKT/PROJJSON text from a pipe. *Depends on public-api.org* — and *argues with
-  its § BOUNDARY*, which deliberately ruled this trust policy out of this crate.
-  /Scoping only, and blocked on settling that first./
+  WKT/PROJJSON text from a pipe. *Depends on public-api.org* — and *argued with
+  its § BOUNDARY*, which had deliberately ruled this trust policy out of this
+  crate. *DONE* — that boundary question was settled in favor of building it
+  (2026-08-17), and ambiguity ended up *reported, not resolved*: where several
+  CRSes fit the name and ellipsoid equally well, =--identify= prints nothing and
+  exits =2= rather than picking, reversing what this plan first proposed. See
+  its § BOUNDARY -- RESOLVED and § RESULTS.
 - [[file:envelope-computation.org][envelope-computation.org]] :: Dimension-aware
-  geometry envelope (bounding-box) computation — the second capability under
-  this crate's broadened charter, and the first that embeds no dataset at all.
-  Independent of the three CRS plans above; prompted by =geosetta= silently
-  dropping a source GeoPackage's cached envelope. *SCOPING ONLY, NOT YET
-  IMPLEMENTED.* Its § OPEN QUESTIONS holds the two live charter questions (how
-  far "not a simple pass-through" extends, and how a non-CRS capability gates
-  into =geosetta='s Cargo features).
+  geometry envelope (bounding-box) computation. *RETIRED 2026-08-18 — moved out
+  of this crate, never implemented here.* Its premise was wrong on the facts
+  (=geosetta= already owns a public =Bbox= fold and already writes GeoParquet's
+  =geo= bbox from it) and its wiring step was unbuildable once the three crates
+  settled on having no dependency edges. The envelope fold and the GeoPackage
+  gap went to
+  [[file:../../geosetta/plans/envelope.org][geosetta/plans/envelope.org]]; the
+  transform-a-bbox-across-CRSes problem it never covered went to
+  [[file:../../nazca/plans/transform-bounds.org][nazca/plans/transform-bounds.org]].
+  Kept for its reasoning trail and its empirically-confirmed GPB envelope
+  layout. Read its § STATUS first — everything after it describes a dependency
+  graph and a =crs-registry= feature that no longer exist.
+- [[file:projjson-identify.org][projjson-identify.org]] :: Extend =--identify= to
+  the other definition dialect — =identify_from_projjson= plus an
+  input-sniffing =identify=, so an id-less *PROJJSON* (what GeoParquet records,
+  and so what a container-reading tool will hand over) resolves the same way an
+  id-less WKT already does. Also fixes the useless UTF-8 error a user gets
+  pointing =--identify= at a binary data file. *Depends on wkt-identify.org* —
+  same three-step method and trust policy, only the extraction step is new;
+  steps 2 and 3 are untouched. Its bulk oracle needs no fixtures and no
+  =projinfo=: stripping the root =id= from all 13,790 embedded PROJJSON
+  definitions is a complete id-less corpus with known-correct answers.
+  *DONE* (2026-08-19), together with its other half
+  =geosetta/plans/crs-definition-output.org= — neither was useful alone, so they
+  landed as one item. The oracle earned its keep immediately: it found two gaps
+  in the *shared* ellipsoid extractor — spheres (WKT writes inverse flattening
+  =0=, PROJJSON a =radius=) and non-metre axes (wrapped with a
+  =conversion_factor=) — that had been silently declining, and fixing them took
+  every one of the 2,705 real Esri WKT fixtures to identifying, not just the
+  PROJJSON corpus. See its § RESULTS.

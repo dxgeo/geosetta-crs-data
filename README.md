@@ -12,16 +12,19 @@ or computed*, not copied. Two capabilities today:
   original reason this crate exists at all: PROJ/EPSG/Esri/IGN/IAU/NKG's
   data terms don't belong bundled into a pure-MIT library by default (see
   [`NOTICE`](NOTICE)), so the *data* lives here, isolated. On top of the
-  trusted-id lookup sits **identification**: recovering a CRS from an
-  *id-less* WKT — an Esri-flavor Shapefile `.prj`, which carries no
-  `AUTHORITY` node — by its name, validated against that WKT's own
-  ellipsoid ([`plans/wkt-identify.org`](plans/wkt-identify.org)).
-- Dimension-aware geometry **envelope (bounding-box) computation** —
-  scoping only so far, see [`plans/envelope-computation.org`](plans/envelope-computation.org).
-  Unlike the CRS registry, this needs no embedded dataset at all — it's
-  pure arithmetic over a geometry's own coordinates — but it's the same
-  *shape* of problem (a value the consumer must derive, not one the source
-  handed it), which is why it lands here rather than in `geosetta` itself.
+  trusted-id lookup sits **identification**: recovering a CRS from a
+  definition that states no code — an Esri-flavor Shapefile `.prj`, which
+  carries no `AUTHORITY` node, or the PROJJSON a container format hands over
+  — by its name, validated against that definition's own ellipsoid
+  ([`plans/wkt-identify.org`](plans/wkt-identify.org),
+  [`plans/projjson-identify.org`](plans/projjson-identify.org)).
+Envelope (bounding-box) computation was briefly planned here as a second
+capability. It was **retired on 2026-08-18 without being implemented** and moved
+to `geosetta` (the fold) and `nazca` (transforming a bbox across CRSes) — see
+[`plans/envelope-computation.org`](plans/envelope-computation.org) § STATUS.
+`geosetta` already owned a public `Bbox` fold and already wrote GeoParquet's
+`geo` bbox from it, so the "a value the consumer must derive" argument was
+describing something the consumer already had.
 
 Originally built as just the CRS registry for Geosetta; broadened to this
 wider charter on 2026-08-17 once envelope computation showed the "isolate
@@ -45,9 +48,10 @@ re-derive or re-implement it themselves**:
   against this crate *at all* — its `crs-registry` feature is gone — and
   composes over a **pipe** instead (see § Integration with Geosetta below).
   The CLI is therefore a first-class interface here, not a convenience
-  wrapper. (Whether a future non-CRS capability like envelope computation
-  changes that calculus is open — see `plans/envelope-computation.org`
-  § OPEN QUESTIONS.)
+  wrapper, and nothing on the horizon changes that — the three crates carry no
+  dependency edges at all (see `../architecture.org`), so a pipe or a
+  caller-side `impl` is how this crate is reached, by design rather than by
+  default.
 - The embedded CRS **data** specifically is a *derived* representation of
   PROJ/EPSG/Esri/IGN/IAU/NKG and is governed by those sources' terms — see
   [`NOTICE`](NOTICE). The Rust code throughout this crate is MIT (see
@@ -58,7 +62,7 @@ re-derive or re-implement it themselves**:
 ```toml
 # Cargo.toml
 [dependencies]
-geoscribe = "0.4.0"
+geoscribe = "0.5.0"
 ```
 
 ```rust
@@ -73,9 +77,9 @@ for (authority, code) in geoscribe::resolve_by_name("GCS_WGS_1984") {
 }
 ```
 
-Or let the crate do the validating — identify an id-less `.prj` by name,
-checked against its own ellipsoid. It never guesses, and where several real
-CRSes fit equally well it never picks one:
+Or let the crate do the validating — identify a definition by name, checked
+against its own ellipsoid. It never guesses, and where several real CRSes fit
+equally well it never picks one:
 
 ```rust
 use geoscribe::Identity;
@@ -87,10 +91,25 @@ match geoscribe::identify_from_wkt(&std::fs::read_to_string("parcels.prj")?) {
 }
 ```
 
-The full public surface is `resolve`, `resolve_by_name`, `identify_from_wkt`,
-`all`, `CrsRecord`, `Identity`, `CRS_COUNT`, and `DATASET_VERSIONS` (see
-`src/lib.rs` doc comments, `plans/public-api.org`, and
-`plans/wkt-identify.org`).
+`identify_from_projjson` is the same thing for the other dialect. When you do
+not know which you have — the usual case when the text arrived over a pipe —
+`identify` sniffs it, uses an inline `id` if the definition states one, and
+tells you which evidence it used:
+
+```rust
+use geoscribe::{Evidence, Identity};
+
+let (identity, evidence) = geoscribe::identify(&text);
+if let (Identity::Unique(rec), Evidence::ValidatedName) = (&identity, evidence) {
+    eprintln!("{}:{} recovered by name, not stated", rec.authority, rec.code);
+}
+```
+
+The full public surface is `resolve`, `resolve_by_name`, `identify`,
+`identify_from_wkt`, `identify_from_projjson`, `all`, `CrsRecord`, `Identity`,
+`Evidence`, `CRS_COUNT`, and `DATASET_VERSIONS` (see `src/lib.rs` doc comments,
+`plans/public-api.org`, `plans/wkt-identify.org`, and
+`plans/projjson-identify.org`).
 
 ## CLI
 
@@ -110,18 +129,43 @@ requested dialect the CRS doesn't have.
 
 An Esri-flavor Shapefile `.prj` carries no `AUTHORITY` node, so there is no
 pair to look up and nothing for `geosetta --print-crs-code` to report.
-`--identify` reads that WKT (from a file, or stdin) and identifies it by name,
-validated against the WKT's own ellipsoid. Same output contract — the
-definition alone on stdout — so it drops straight into a pipeline:
+`--identify` reads that definition (from a file, or stdin) and identifies it by
+the strongest evidence it carries. Same output contract — the definition alone
+on stdout — so it drops straight into a pipeline:
 
 ```
 $ geoscribe --identify --projjson parcels.prj \
     | geosetta parcels.shp parcels.parquet --crs -
 ```
 
-This is **weaker evidence** than a stated code (a name plus an ellipsoid), so
-it declines rather than guessing, and where several real CRSes fit equally well
-it writes **nothing** to stdout, lists them on stderr, and exits `2`:
+**WKT or PROJJSON, sniffed, not flagged.** The first non-whitespace `{` decides;
+there is no input-dialect flag, because `--wkt`/`--wkt2`/`--projjson` already
+mean the *output* dialect and two flag families sharing three names with
+opposite meanings would be a footgun. That matters most for the formats that
+bury their CRS in a container: GeoParquet records PROJJSON, so the definition
+`geosetta --print-crs` prints out of one arrives here as JSON.
+
+```
+$ geosetta parcels.parquet --print-crs \
+    | geoscribe --identify --projjson \
+    | geosetta parcels.parquet parcels.fgb --crs -
+```
+
+**An inline `id` wins when the definition states one**, since a stated code is
+stronger evidence than a recovered name — so the pipeline above is one
+unconditional command whether or not the file's CRS has an id. Because you can
+no longer tell from the mode alone which happened, `--identify` reports it on
+one line of stderr (stdout is unchanged, so pipelines are unaffected):
+
+```
+$ geoscribe --identify --all parcels.prj
+identified EPSG:4326 by name, validated against the definition's ellipsoid
+EPSG:4326
+```
+
+Name recovery is **weaker evidence** than a stated code, so it declines rather
+than guessing, and where several real CRSes fit equally well it writes
+**nothing** to stdout, lists them on stderr, and exits `2`:
 
 ```
 $ geoscribe --identify utm.prj
@@ -168,21 +212,24 @@ accepted arbitrary WKT/PROJJSON text from a file or stdin and neither knows nor
 cares what produced it. That is the payoff of its text-in design, and the
 reason the identification work belongs entirely on this side of the boundary
 (`plans/wkt-identify.org`). See Geosetta's `project.org`
-§ "Recommended resolvers" for the other end of the pipe. How a second, non-CRS
-capability (envelope computation) would be consumed — a revived Cargo feature,
-more piping, or something else — is not yet decided; see
-`plans/envelope-computation.org` § OPEN QUESTIONS.
+§ "Recommended resolvers" for the other end of the pipe. There is no plan to
+revive a Cargo feature for this: `geosetta` and `nazca` both depend on nothing,
+and reach this crate over a pipe or through a caller-supplied implementation
+(see `../architecture.org`).
 
 ## Status
 
-**Built, not yet published under this name.** `v0.2.0` shipped on crates.io
-under this crate's original name, `geosetta-crs-data`
-([crates.io](https://crates.io/crates/geosetta-crs-data)). The crate has
-since been renamed to its current name, `geoscribe`
-([github.com/dxgeo/geoscribe](https://github.com/dxgeo/geoscribe)) — GitHub
-rename done. Publishing `v0.4.0` (R6's public API plus `identify_from_wkt`) under
-`geoscribe` to crates.io is next; once that's live, every `geosetta-crs-data` version
-will be yanked there to point dependents at the new name.
+**Published under this name.** The crate began life as `geosetta-crs-data` and
+was renamed to `geoscribe`
+([github.com/dxgeo/geoscribe](https://github.com/dxgeo/geoscribe)); the rename
+is complete on both ends — releases go out under the new name on
+[crates.io](https://crates.io/crates/geoscribe), and every `geosetta-crs-data`
+version is yanked, pointing dependents here.
+
+The registry (R1–R5, R6a–R6d) and id-less identification in both dialects
+(`identify`, `identify_from_wkt`, `identify_from_projjson`, `Evidence`) are
+done; see [`plans/README.org`](plans/README.org) for the plan index and
+[`plans/todo.org`](plans/todo.org) for what is open.
 The `GCR1` v2 blob (`src/registry.bin.zst`, 1.07 MB compressed) embeds
 PROJJSON + WKT1 + WKT2:2019 for all 13,790 `proj.db` CRSes, generated by
 `tools/gen_crs_registry.py`. See § Integration with Geosetta above for how
@@ -198,7 +245,7 @@ Cargo.toml             crate manifest (no external dependencies)
 src/lib.rs              public API: CrsRecord, resolve, resolve_by_name, all
 src/registry.rs          GCR1 decode + lookup internals
 src/zstd.rs              this crate's own zstd decoder (RFC 8878, from scratch)
-src/identify.rs          identify_from_wkt: name + ellipsoid recovery, ambiguity-aware
+src/identify.rs          identify/_from_wkt/_from_projjson: name + ellipsoid recovery
 src/wkt.rs               shallow WKT lexer (ported from geosetta, not shared)
 src/json.rs              minimal read-only JSON reader for the registry's own PROJJSON
 src/main.rs              the `geoscribe` CLI
@@ -208,6 +255,7 @@ src/registry.bin.zst      generated: the GCR1 v2 blob (1.07 MB, 13,790 CRSes)
 tests/                  integration tests
   identify_esri.rs       the Esri corpus: equivalence, properties, projinfo oracles
   cli_identify.rs        --identify's stdout/stderr/exit-status contracts
+  identify_projjson_oracle.rs  every embedded CRS, id stripped, fed back in
   fixtures/              431 geographic + 2,274 projected real WKT1_ESRI exports
 tools/                  build-time generators (need PROJ's projinfo + proj.db)
 project.org             what this crate is: status, architecture, roadmap
@@ -219,7 +267,8 @@ plans/                  design notes, one self-contained plan per file
   registry-format.org    the GCR1 container-format spec
   public-api.org         the public API plan (R6)
   wkt-identify.org       id-less WKT identification (implemented)
-  envelope-computation.org  dimension-aware bbox computation (scoping only)
+  projjson-identify.org  the same for PROJJSON, + the sniff (implemented)
+  envelope-computation.org  dimension-aware bbox computation (RETIRED, moved out)
 NOTICE                  third-party data attributions and terms
 LICENSE                 MIT (covers the Rust code only)
 LICENSES/                per-source license texts (Apache-2.0 for Esri)

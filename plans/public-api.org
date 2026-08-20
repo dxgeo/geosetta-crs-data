@@ -203,8 +203,8 @@ into the lookup.
   version pin on =geoscribe= needs to move with it. /Both halves are now
   moot in different ways:/ the bump landed and then some — =0.3.0= and =0.4.0=
   are both published ([[file:wkt-identify.org][wkt-identify.org]] added more
-  public surface), and =geosetta= 0.24.0 removed the dependency entirely, so
-  there is no pin left to move.
+  public surface, and =0.5.0= adds more again), and =geosetta= 0.24.0 removed
+  the dependency entirely, so there is no pin left to move.
 - *Duplicate zstd decoder as a maintenance fact, not a bug.* Flagging this so
   it isn't "cleaned up" later by someone merging the two copies back
   together without noticing why they're separate -- see § MODULE LAYOUT.

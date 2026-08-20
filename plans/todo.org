@@ -9,14 +9,18 @@ DONE included). Each entry is just a link to its real plan/section for detail;
 check it off and remove it once the item ships or is shelved.
 
 - [ ] [[file:wkt-identify.org::*OPEN QUESTIONS][wkt-identify.org — should =GCR1= carry a =deprecated= flag?]] —
-  the highest-value follow-up from the identification work: 109 of 431
-  geographic and 890 of 2,274 projected Esri =.prj= fixtures match *more than
+  the highest-value follow-up from the identification work: 110 of 431
+  geographic and 891 of 2,274 projected Esri =.prj= fixtures match *more than
   one* registry CRS equally well, almost always a deprecated ESRI code beside
   its live twin, and =identify_from_wkt= reports all of them rather than
-  guessing. =proj.db= has the column; the blob does not. Adding it is a =GCR1=
-  v3 format change plus a regeneration, and carries a policy question of its
-  own (preferring live over deprecated is a judgment — it belongs in
-  =identify.rs=, not =resolve=).
+  guessing. (Counts are post-2026-08-19, after the sphere and non-metre-axis
+  fixes from [[file:projjson-identify.org][projjson-identify.org]] took both
+  corpora to *zero unidentified* — which makes ambiguity the only residual
+  failure mode left in all 2,705 real Esri rows, and this entry the last
+  accuracy work outstanding.) =proj.db= has the column; the blob does not.
+  Adding it is a =GCR1= v3 format change plus a regeneration, and carries a
+  policy question of its own (preferring live over deprecated is a judgment —
+  it belongs in =identify.rs=, not =resolve=).
 - [ ] [[file:public-api.org::*MILESTONES][public-api.org — R6e, the acceptance test]] —
   confirm a consumer with *no* =geosetta= dependency can depend on =geoscribe=
   alone and resolve a real code. Vehicle changed 2026-08-18: =nazca='s path-dep

@@ -11,21 +11,32 @@
 //! that wants a WKT/PROJJSON string on a pipe or in a file (`ogr2ogr -a_srs
 //! $(geoscribe ...)`, `geoscribe EPSG:4326 --wkt2 > crs.wkt`, ...).
 //!
-//! The second form covers the case the first cannot: an *id-less* WKT — an
-//! Esri-flavor Shapefile `.prj`, which carries no `AUTHORITY` node, so there
-//! is no pair to look up. It reads that WKT (from `FILE`, or stdin) and
-//! identifies it by name, validated against the WKT's own ellipsoid
-//! ([`geoscribe::identify_from_wkt`]). The payoff, on the `geosetta` side:
+//! The second form covers the case the first cannot: a definition with no pair
+//! to look up — an Esri-flavor Shapefile `.prj`, which carries no `AUTHORITY`
+//! node, or the PROJJSON a container format hands over. It reads that text
+//! (from `FILE`, or stdin) and identifies it *by the strongest evidence the
+//! definition carries* ([`geoscribe::identify`]): the dialect is sniffed, an
+//! inline id is used when there is one, and otherwise the name is recovered and
+//! validated against the definition's own ellipsoid. The payoff, on the
+//! `geosetta` side:
 //!
 //! ```text
 //! geoscribe --identify --projjson parcels.prj \
 //!   | geosetta parcels.shp parcels.parquet --crs -
+//!
+//! geosetta parcels.parquet --print-crs \
+//!   | geoscribe --identify --projjson \
+//!   | geosetta parcels.parquet out.parquet --crs -
 //! ```
 //!
-//! `--identify` is *weaker evidence* than the trusted-id form — a name plus an
-//! ellipsoid, not a stated code — which is why it never guesses and never
-//! picks. Where several real CRSes share a name and an ellipsoid it writes
-//! *nothing* to stdout, lists the candidates on stderr, and exits `2`, leaving
+//! Because the caller cannot tell from the mode alone which evidence produced
+//! an answer, `--identify` says so on one line of stderr. stdout is unchanged
+//! — the definition, or nothing — so this costs a pipeline nothing.
+//!
+//! `--identify` makes a *validated* guarantee, not a weak one: where it falls
+//! back to a name it still checks that name against the definition's own
+//! ellipsoid, which is why it never guesses and never picks. Where several
+//! real CRSes share a name and an ellipsoid it writes *nothing* to stdout, lists the candidates on stderr, and exits `2`, leaving
 //! the choice to whoever can actually make it. `--all` prints those candidates
 //! as `AUTHORITY:CODE` lines on stdout for a human to adjudicate; that output
 //! is a list of codes, not a definition, so it is for reading, not for piping
@@ -44,7 +55,7 @@
 
 use std::io::Read;
 
-use geoscribe::Identity;
+use geoscribe::{Evidence, Identity};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Dialect {
@@ -80,7 +91,7 @@ struct Args {
 /// stderr.
 const EXIT_AMBIGUOUS: i32 = 2;
 
-const USAGE: &str = "usage: geoscribe <AUTHORITY:CODE> [--wkt | --wkt2 | --projjson]\n       geoscribe --identify [--all] [--wkt | --wkt2 | --projjson] [FILE | -]\n  e.g. geoscribe EPSG:4326 --wkt2\n       geoscribe --identify --projjson parcels.prj\n  default dialect is --projjson (the one every entry has)\n  --identify reads an id-less WKT (a Shapefile .prj) from FILE or stdin and\n  identifies it by name, validated against its own ellipsoid; it exits 2\n  without printing when several CRSes fit. --all lists those candidates.";
+const USAGE: &str = "usage: geoscribe <AUTHORITY:CODE> [--wkt | --wkt2 | --projjson]\n       geoscribe --identify [--all] [--wkt | --wkt2 | --projjson] [FILE | -]\n  e.g. geoscribe EPSG:4326 --wkt2\n       geoscribe --identify --projjson parcels.prj\n  default dialect is --projjson (the one every entry has)\n  --identify reads a CRS definition (WKT or PROJJSON, sniffed) from FILE or\n  stdin and identifies it by the strongest evidence it carries -- an inline id\n  if present, else its name validated against its own ellipsoid. It exits 2\n  without printing when several CRSes fit; --all lists those candidates.\n  Which evidence was used is reported on stderr.";
 
 fn main() {
     match run() {
@@ -120,10 +131,30 @@ fn run() -> Result<(), Failure> {
 fn identify(source: Source, list_all: bool, dialect: Dialect) -> Result<(), Failure> {
     let text = read_source(&source)?;
     if text.trim().is_empty() {
-        return Err(format!("{}: no WKT to identify (input was empty)", source_label(&source)).into());
+        return Err(
+            format!("{}: no definition to identify (input was empty)", source_label(&source))
+                .into(),
+        );
     }
 
-    match geoscribe::identify_from_wkt(&text) {
+    let (identity, evidence) = geoscribe::identify(&text);
+    // Provenance on stderr, before the answer on stdout: a caller can no longer
+    // infer from the mode alone whether a trusted id or a validated name
+    // produced this, and the distinction is the whole point of the mode.
+    if let Identity::Unique(rec) = &identity {
+        match evidence {
+            Evidence::InlineId => eprintln!(
+                "identified {}:{} from the definition's own id (trusted)",
+                rec.authority, rec.code
+            ),
+            Evidence::ValidatedName => eprintln!(
+                "identified {}:{} by name, validated against the definition's ellipsoid",
+                rec.authority, rec.code
+            ),
+        }
+    }
+
+    match identity {
         Identity::Unique(rec) if list_all => {
             println!("{}:{}", rec.authority, rec.code);
             Ok(())
@@ -183,12 +214,34 @@ fn read_source(source: &Source) -> Result<String, Failure> {
         Source::Stdin => std::io::stdin()
             .read_to_string(&mut text)
             .map(|_| ())
-            .map_err(|e| format!("reading stdin: {e}")),
+            .map_err(|e| not_text("stdin", &e)),
         Source::Path(path) => std::fs::read_to_string(path)
             .map(|s| text = s)
-            .map_err(|e| format!("reading \"{path}\": {e}")),
+            .map_err(|e| not_text(path, &e)),
     }?;
     Ok(text)
+}
+
+/// The message for a failed read, naming the actual mistake when the input is
+/// not text at all.
+///
+/// Pointing `--identify` at a `.parquet` or a `.gpkg` is an easy thing to do —
+/// they are where CRSes live — and `std`'s own words for it ("stream did not
+/// contain valid UTF-8") are accurate and no help whatever in explaining that
+/// this mode reads a *definition*, not a data file.
+///
+/// Deliberately names no tool. Which reader the user should reach for is their
+/// business; this crate's tool-agnosticism cuts both ways, and it has no more
+/// standing to assert that than the tools on the other end have to assume it.
+fn not_text(label: &str, e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::InvalidData {
+        return format!(
+            "\"{label}\": not text — --identify reads a CRS definition (WKT or PROJJSON), \
+             not a data file. To identify the CRS inside a data file, have the tool that \
+             reads that format print its definition first."
+        );
+    }
+    format!("reading \"{label}\": {e}")
 }
 
 fn source_label(source: &Source) -> String {
