@@ -4,7 +4,7 @@
 
 * Public Resolve API
 
-** STATUS -- DONE (R6a-R6e all implemented and verified)
+** STATUS -- R6a-R6d DONE; R6e (the acceptance test) still OPEN
 Revises =crs-registry.org='s § MODULE LAYOUT, specifically this line: "*this
 crate holds only the generated data + thin accessors* ... *Decompression and
 lookup happen here* [in =geosetta=], using =geosetta='s own
@@ -33,7 +33,11 @@ string.
 spec-compliant =GCR1= decoder. That was a reasonable v1 shape with one
 consumer. It stops being reasonable with a second one: [[https://github.com/dxgeo/nazca][=nazca=]]
 (the standalone reprojection crate) also needs =(authority, code) ->
-definition= lookup, and =geosetta='s own implementation
+definition= lookup -- reached, as of 2026-08-18, by a *caller* implementing
+=nazca='s =CrsRegistry= trait over this crate's =resolve= rather than by
+=nazca= depending on it, which does not change the argument below: either way
+the alternative was a second hand-written =GCR1= decoder. =geosetta='s own
+implementation
 (=src/crs/registry.rs=) isn't reusable -- =NamedCrs::registry_wkt=/
 =registry_wkt2= are =pub(crate)=, confirmed by reading =geosetta/src/crs.rs=
 directly. =GCR1= is an in-house binary format with no external spec to
@@ -177,21 +181,30 @@ into the lookup.
   test suite (49 tests) plus both R2 ESRI name-recovery bulk oracles (431
   geographic + 2,274 projected real fixtures) pass with zero behavioral
   drift.
-- *R6e.* [OPEN] Confirm a bare consumer with *no* dependency on =geosetta= --
-  =nazca=, or a throwaway smoke-test crate -- can depend on =geoscribe= alone
-  and resolve a real code. Deliberately deferred: =nazca= already has the
-  path-dep + =geoscribe= feature (from the rename pass) but nothing in its
-  own source calls through yet. This is the actual point of the plan --
-  treat it as the acceptance test, not an afterthought, when it's picked up.
+- *R6e.* [OPEN] Confirm a bare consumer with *no* dependency on =geosetta= can
+  depend on =geoscribe= alone and resolve a real code. This is the actual point
+  of the plan -- treat it as the acceptance test, not an afterthought, when
+  it's picked up.
+
+  *Vehicle changed 2026-08-18.* This previously read "=nazca=, or a throwaway
+  smoke-test crate," deferred on the grounds that =nazca= already had the
+  path-dep + =geoscribe= feature and simply hadn't called through yet. That
+  dep and feature were removed: per
+  [[file:../../architecture.org][architecture.org]] the three crates carry no
+  dependency edges, so =nazca= will never be a dependent. Use a throwaway
+  smoke-test crate, or a =dev-dependency= test on =nazca='s side that
+  implements its =CrsRegistry= trait over =resolve= -- the latter is strictly
+  better, since it exercises the *real* caller-side shape this API exists to
+  serve without making =nazca= a dependent.
 
 ** RISKS / OPEN QUESTIONS
 - *Versioning.* Public API surface added means a real semver bump
   (=0.2.0= -> =0.3.0=, not a patch), and =geosetta='s own =Cargo.toml=
   version pin on =geoscribe= needs to move with it. /Both halves are now
-  moot in different ways:/ =0.3.0= was never published, and =0.4.0=
-  supersedes it ([[file:wkt-identify.org][wkt-identify.org]] added more public
-  surface); and =geosetta= 0.24.0 removed the dependency entirely, so there is
-  no pin left to move.
+  moot in different ways:/ the bump landed and then some — =0.3.0= and =0.4.0=
+  are both published ([[file:wkt-identify.org][wkt-identify.org]] added more
+  public surface), and =geosetta= 0.24.0 removed the dependency entirely, so
+  there is no pin left to move.
 - *Duplicate zstd decoder as a maintenance fact, not a bug.* Flagging this so
   it isn't "cleaned up" later by someone merging the two copies back
   together without noticing why they're separate -- see § MODULE LAYOUT.

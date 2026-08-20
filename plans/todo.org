@@ -18,33 +18,31 @@ check it off and remove it once the item ships or is shelved.
   own (preferring live over deprecated is a judgment — it belongs in
   =identify.rs=, not =resolve=).
 - [ ] [[file:public-api.org::*MILESTONES][public-api.org — R6e, the acceptance test]] —
-  confirm a consumer with *no* =geosetta= dependency (=nazca=, or a throwaway
-  smoke-test crate) can depend on =geoscribe= alone and resolve a real code.
-  =nazca= already has the path-dep and the feature but calls nothing yet. The
-  plan flags this as the actual point of R6, not an afterthought.
-- [ ] *Publish =v0.4.0= under the =geoscribe= name* — =v0.2.0= shipped as
-  =geosetta-crs-data=; the GitHub rename is done, crates.io is not. Once live,
-  yank every =geosetta-crs-data= version to point dependents at the new name.
-  =0.3.0= (R6's public API) and =0.4.0= (=identify_from_wkt=) are both tagged
-  but unpublished, so =0.4.0= is the first crates.io release under this name.
-  The =geosetta= version pin that [[file:public-api.org::*RISKS][public-api.org § RISKS]]
-  flagged no longer exists — geosetta 0.24.0 dropped the dependency.
-- [ ] [[file:envelope-computation.org][envelope-computation.org]] — dimension-aware
-  bbox computation: a =Coord=/=Envelope= pair of this crate's own plus the
-  =envelope()= entry point, so =geosetta= stops dropping a source GeoPackage's
-  cached envelope. Scoping only.
-- [ ] [[file:envelope-computation.org::*OPEN QUESTIONS][envelope-computation.org — how does a non-CRS capability gate in?]] —
-  whether envelope computation shares =geosetta='s =crs-registry= feature, gets
-  its own, or something else. Blocks the plan above and gets more pressing with
-  every capability added. See also =../../architecture.org='s § OPEN QUESTIONS.
-- [ ] [[file:envelope-computation.org::*OPEN QUESTIONS][envelope-computation.org — how far does the charter extend?]] —
-  "own whatever geospatial metadata isn't a simple pass-through" is an easy bar
-  to satisfy sloppily. The risk isn't this addition; it's that the *next* one
-  gets less scrutiny than this one did.
+  confirm a consumer with *no* =geosetta= dependency can depend on =geoscribe=
+  alone and resolve a real code. Vehicle changed 2026-08-18: =nazca='s path-dep
+  and =geoscribe= feature were removed (no dependency edges between the three
+  crates — see [[file:../../architecture.org][architecture.org]]), so use a
+  throwaway smoke-test crate, or better, a =dev-dependency= test on =nazca='s
+  side implementing its =CrsRegistry= trait over =resolve=. Nothing blocks the
+  latter: =nazca='s =[dev-dependencies]= is empty. The plan flags this as the
+  actual point of R6, not an afterthought.
+- [ ] *How far does this crate's charter extend?* — "own whatever geospatial
+  metadata isn't a simple pass-through" is an easy bar to satisfy sloppily, and
+  envelope computation is now a worked example of it being satisfied *wrongly*:
+  the capability read as in-charter, and was still in the wrong crate. The risk
+  was never the first addition; it is that the next one gets less scrutiny.
+  Tracked at [[file:../../architecture.org][architecture.org]] § OPEN QUESTIONS
+  — no longer hosted in the retired plan
+  ([[file:envelope-computation.org][envelope-computation.org]], RETIRED
+  2026-08-18).
 - [ ] [[file:crs-registry.org::*RISKS / REMAINING OPEN QUESTIONS][crs-registry.org — table currency]] —
   the registry is only as current as the =proj.db= it was generated from; a
   newer EPSG release means regenerating the blob *and* re-checking attribution.
-  No trigger for this exists today.
+  No trigger for this exists today. A regeneration is also when
+  [[file:wkt-identify.org::*OPEN QUESTIONS][wkt-identify.org's "does the
+  ellipsoid-only bar hold as =proj.db= grows?"]] gets tested — rerun the bulk
+  oracles, and add a real projection-parameter check only if one comes back
+  *wrong* rather than merely declined.
 - [ ] [[file:crs-registry.org::*RISKS / REMAINING OPEN QUESTIONS][crs-registry.org — snapping tolerance]] —
   exact vs. epsilon on parameter values in name/param-match validation; err
   toward *not* snapping. Governs recovery paths 2/3 only (inline ids are
